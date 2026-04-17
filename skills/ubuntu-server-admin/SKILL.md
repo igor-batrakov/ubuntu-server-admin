@@ -53,7 +53,8 @@ description: >
 
 ### Подключение к серверу
 
-Команды выполняются через `ssh <alias>` (настроен в `~/.ssh/config`).
+Первый вход (пароль): `ssh root@<SERVER_IP>`
+После настройки ключа: `ssh <USERNAME>@<SERVER_IP>` или через alias в `~/.ssh/config`.
 Если MCP SSH доступен — можно использовать его, но `ssh` через bash тоже работает.
 
 ---
@@ -165,7 +166,9 @@ sudo fail2ban-client status sshd
 ```bash
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
-sudo ufw allow 22/tcp comment 'SSH'
+sudo ufw allow <SSH_PORT>/tcp comment 'SSH'
+# ВАЖНО: убедись что SSH порт добавлен ПЕРЕД enable!
+sudo ufw status numbered   # проверь что SSH есть в списке
 sudo ufw enable
 ```
 
@@ -225,14 +228,21 @@ ip6tables -I DOCKER-USER -p tcp --dport <PORT> -j REJECT
 
 ---
 
-## 3. Docker
+## 3. Docker + nginx
 
-### Установка
+### Установка Docker
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker <USERNAME>
 sudo systemctl enable docker && sudo systemctl start docker
+```
+
+### Установка nginx
+
+```bash
+sudo apt install -y nginx
+sudo systemctl enable nginx
 ```
 
 ### Лог-ротация (обязательно!)
@@ -263,6 +273,44 @@ AmneziaWG добавляет junk-пакеты поверх WireGuard, скры�
 
 Клиенты подключаются через приложение **AmneziaVPN** (не стандартный WireGuard).
 **Keenetic Ultra** поддерживает AmneziaWG нативно (KeeneticOS 4.1+).
+
+### Установка AmneziaWG DKMS модуля
+
+Выполнить на хосте (не внутри контейнера):
+
+```bash
+# Зависимости
+sudo apt install -y dkms git linux-headers-$(uname -r) build-essential
+
+# Скачать исходники
+sudo git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module \
+  /usr/src/amneziawg-1.0.0
+
+# Установить через DKMS (автоматически пересобирается при обновлении ядра)
+sudo dkms add amneziawg/1.0.0
+sudo dkms build amneziawg/1.0.0
+sudo dkms install amneziawg/1.0.0
+
+# Загрузить модуль и сделать постоянным
+sudo modprobe amneziawg
+echo "amneziawg" | sudo tee /etc/modules-load.d/amneziawg.conf
+
+# Проверка
+lsmod | grep amneziawg
+```
+
+Если `linux-headers-$(uname -r)` не найден — обнови ядро: `apt upgrade -y` и перезагрузись.
+
+### docker-compose.yml (пример)
+
+### Генерация PASSWORD_HASH для wg-easy
+
+```bash
+# Генерирует bcrypt-хэш пароля (заменить YOUR_PASSWORD своим):
+docker run --rm -it ghcr.io/wg-easy/wg-easy wgpw 'YOUR_PASSWORD'
+# Вывод: PASSWORD_HASH='$2b$12$...'
+# Каждый символ $ нужно удвоить в docker-compose.yml: $2b → $$2b
+```
 
 ### docker-compose.yml (пример)
 
@@ -344,10 +392,15 @@ server {
 
 3x-ui — веб-панель для xray со встроенным xray-core. Все inbound'ы создаются через UI.
 
+### Актуальная версия 3x-ui
+
+Смотреть на https://github.com/MHSanaei/3x-ui/releases — взять последний тег, например `v2.8.11`.
+Всегда пинить конкретную версию (не `latest`) — это защитит от неожиданных breaking changes.
+
 ```yaml
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:<VERSION>  # Пинить версию!
+    image: ghcr.io/mhsanaei/3x-ui:<VERSION>  # Пинить версию! Например: v2.8.11
     container_name: 3x-ui
     volumes:
       - ./db:/etc/x-ui
