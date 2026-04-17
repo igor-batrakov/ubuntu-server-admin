@@ -349,20 +349,24 @@ volumes:
 
 ### nginx reverse proxy для wg-easy UI
 
+**Два варианта в зависимости от наличия домена:**
+
+#### Вариант А: с доменом (DOMAIN задан в SETUP_INFO.md)
+
+Сертификат получить через acme.sh (см. секцию 5). Затем:
+
 ```nginx
 server {
-    listen <EXTERNAL_UI_PORT> ssl;
+    listen <WG_UI_PORT> ssl;
     server_name <DOMAIN>;
 
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
 
-    # Security headers
     add_header Strict-Transport-Security "max-age=63072000" always;
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
 
-    # Rate limiting
     limit_req zone=panel burst=20;
 
     location / {
@@ -375,6 +379,43 @@ server {
     }
 }
 ```
+
+#### Вариант Б: без домена (DOMAIN пустой)
+
+Использовать самоподписанный сертификат:
+
+```bash
+sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/wg-easy.key \
+  -out /etc/ssl/certs/wg-easy.crt \
+  -subj "/CN=<SERVER_IP>"
+```
+
+```nginx
+server {
+    listen <WG_UI_PORT> ssl;
+
+    ssl_certificate /etc/ssl/certs/wg-easy.crt;
+    ssl_certificate_key /etc/ssl/private/wg-easy.key;
+
+    add_header X-Frame-Options DENY always;
+    add_header X-Content-Type-Options nosniff always;
+
+    limit_req zone=panel burst=20;
+
+    location / {
+        proxy_pass http://127.0.0.1:<INTERNAL_UI_PORT>;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+> Браузер покажет предупреждение о самоподписанном сертификате — это нормально.
+> Трафик всё равно шифруется, а панель доступна только с доверенных IP.
 
 ### Ограничения wg-easy v15
 
