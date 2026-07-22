@@ -22,10 +22,13 @@ curl ifconfig.me
 ## Как запустить
 
 ```bash
-git clone https://github.com/YOUR/vps-setup
+# Склонируй этот репозиторий и перейди в него
 cd vps-setup
 
-# 1. Открой SETUP_INFO.md и заполни все поля
+# 1. Создай локальную копию параметров и заполни все поля:
+cp SETUP_INFO.example.md SETUP_INFO.md
+# (SETUP_INFO.md в .gitignore — реальные IP и пароли не попадут в git)
+
 # 2. Запусти Claude Code:
 claude
 # 3. Вставь содержимое KICKSTART.md как первое сообщение
@@ -45,6 +48,6 @@ claude
 
 ## Требования к серверу
 
-- Ubuntu 24.04 LTS
+- Ubuntu 24.04 LTS (26.04 пока не брать — DKMS-модуль AmneziaWG не собирается на её ядре)
 - Минимум 1 GB RAM, 10 GB диск
 - Чистая установка (или частично настроенная — Claude проверит)

@@ -1,0 +1,4 @@
+.DS_Store
+
+# Локальная копия с реальными IP и паролями — в git только SETUP_INFO.example.md
+SETUP_INFO.md
