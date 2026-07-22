@@ -2,14 +2,18 @@
 name: ubuntu-server-admin
 description: >
   Системное администрирование Ubuntu Linux серверов: установка, настройка, hardening,
-  VPN (AmneziaWG + wg-easy, xray через 3x-ui с VLESS + Reality/WebSocket/XHTTP для обхода DPI),
+  VPN (AmneziaWG 2.0 + wg-easy, xray через 3x-ui с VLESS + Reality/XHTTP для обхода DPI),
   файрвол UFW, Docker, nginx, автобэкапы, диагностика.
   Используй при любых задачах: настройка Ubuntu сервера, VPN туннели, UFW, SSH hardening,
-  AmneziaWG, WireGuard, wg-easy, xray, 3x-ui, Docker, обход DPI, split tunneling,
+  AmneziaWG, AmneziaWG 2.0, WireGuard, wg-easy, xray, 3x-ui, Docker, обход DPI, split tunneling,
   диагностика сетевых проблем на Linux, подключение роутеров к VPN.
 ---
 
 # Ubuntu Server Administration + VPN
+
+> **Целевая ОС: Ubuntu 24.04 LTS.** Ubuntu 26.04 LTS пока НЕ брать за основу — DKMS-модуль
+> amneziawg не собирается на её ядре ([issue #167](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/167)).
+> Пересмотреть, когда issue закроют.
 
 ## Архитектура: несколько VPN на одном сервере
 
@@ -53,7 +57,7 @@ description: >
 
 ### Подключение к серверу
 
-Первый вход (пароль): `ssh root@<SERVER_IP>`
+Первый вход (пароль): `ssh root@<SERVER_IP>` — пароль пользователь вводит сам в терминале.
 После настройки ключа: `ssh <USERNAME>@<SERVER_IP>` или через alias в `~/.ssh/config`.
 Если MCP SSH доступен — можно использовать его, но `ssh` через bash тоже работает.
 
@@ -139,6 +143,41 @@ sudo sshd -t && sudo systemctl restart ssh
 ```
 
 **Gotcha:** файл `/etc/ssh/sshd_config.d/50-cloud-init.conf` может содержать `PasswordAuthentication yes`, перезаписывая hardening. Проверяй и исправляй!
+
+**Gotcha:** проверяй РЕЗУЛЬТАТ через `sudo sshd -T | grep -iE 'permitroot|passwordauth'` (эффективные значения), а не только файлы — в `sshd_config.d/` действует «first match wins».
+
+### SSH-ключи: ed25519 + безопасная миграция
+
+**Политика ключей:** тип `ed25519` (не RSA); один ключ на сервер; имя `<сервер>_<устройство>` (тип в имени НЕ указывать — он уже внутри ключа); с passphrase + хранение в Keychain (macOS).
+
+**NOPASSWD sudo** (если нужен autosudo вместо sudo-с-паролем):
+```bash
+echo "<user> ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-<user>-nopasswd
+chmod 440 /etc/sudoers.d/90-<user>-nopasswd
+visudo -cf /etc/sudoers.d/90-<user>-nopasswd   # проверка синтаксиса
+```
+
+**Безопасная миграция/добавление ключа — порядок «добавить новый → проверить → удалить старый» (НЕ запираясь):**
+```bash
+# 1. Локально: ed25519 с passphrase
+ssh-keygen -t ed25519 -f ~/.ssh/<server>_<device> -C "<server>_<device>"
+# 2. Добавить .pub РЯДОМ со старым (append, старый НЕ трогать)
+ssh-copy-id -i ~/.ssh/<server>_<device>.pub <user>@<host>
+# 3. Загрузить в agent+Keychain и проверить вход по НОВОМУ ключу в ОТДЕЛЬНОЙ сессии + sudo
+ssh-add --apple-use-keychain ~/.ssh/<server>_<device>
+ssh -i ~/.ssh/<server>_<device> -o IdentitiesOnly=yes <user>@<host> 'whoami; sudo whoami'
+# 4. Обновить ~/.ssh/config: IdentityFile ~/.ssh/<server>_<device> + IdentitiesOnly yes
+# 5. ТОЛЬКО ТЕПЕРЬ удалить старый ключ (с бэкапом)
+cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak-$(date +%F)
+sed -i '/<old-key-comment>/d' ~/.ssh/authorized_keys
+```
+
+**Перед сменой пользователя входа / закрытием root** проверь `sudo passwd -S <user>` = `P` (пароль есть) → VNC-консоль провайдера как fallback на случай потери SSH.
+
+**Gotcha (macOS, passphrase-ключ неинтерактивно):** для `ssh-add` в скрипте без tty —
+`SSH_ASKPASS=<script> SSH_ASKPASS_REQUIRE=force DISPLAY=:0 ssh-add --apple-use-keychain ~/.ssh/key`, где `<script>` делает `cat` файла с passphrase.
+
+**Gotcha (sudo + редирект):** `sudo cmd < /root/file` падает с `Permission denied` — редирект `<` открывает shell под обычным юзером, не под root. Используй `sudo cat /root/file | ...` или `sudo sh -c '... < /root/file'`.
 
 ### fail2ban
 
@@ -268,11 +307,26 @@ sudo systemctl restart docker
 
 ### AmneziaWG — обфускация WireGuard
 
-AmneziaWG добавляет junk-пакеты поверх WireGuard, скрывая трафик от DPI.
-Требуется DKMS модуль `amneziawg` на хосте + `EXPERIMENTAL_AWG=true` в wg-easy.
+**AmneziaWG 2.0** (выпущен 2026-05-05) — фундаментально новая архитектура:
+- Маскируется под реальные UDP-протоколы (DNS, QUIC, SIP) вместо «шума»
+- Динамические диапазоны заголовков (не статичные, как в 1.x)
+- Случайный padding во всех типах WG-сообщений — значительно сложнее детектировать
 
-Клиенты подключаются через приложение **AmneziaVPN** (не стандартный WireGuard).
-**Keenetic Ultra** поддерживает AmneziaWG нативно (KeeneticOS 4.1+).
+AWG 1.x: добавлял junk-пакеты поверх WireGuard, скрывая сигнатуру. В 2026 году этого уже недостаточно против современного DPI.
+
+**Требования:**
+- DKMS модуль `amneziawg` на хосте
+- `EXPERIMENTAL_AWG=true` в wg-easy (в v16 будет включён по умолчанию)
+- Клиент **AmneziaVPN ≥ 4.8.12.9** для поддержки AWG 2.0 (старые версии работают только с AWG 1.x)
+
+**Статус kernel-модуля (июль 2026):** официальный репозиторий
+`amnezia-vpn/amneziawg-linux-kernel-module` в master пока содержит только протокол **1.x** —
+исходники модуля 2.0 не опубликованы ([issue #161](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/161)).
+Установка по инструкции ниже даёт AWG 1.x; конфиги 1.x и 2.0 **несовместимы** (новые ключи
+и конфиги при переходе). wg-easy v15.3+ уже поддерживает диапазоны H1–H4 из AWG 2.0.
+Перед установкой проверь релизы — как только модуль 2.0 выйдет, ставить его.
+
+**Keenetic Ultra** поддерживает AmneziaWG нативно (KeeneticOS 4.1+), уточняй версию протокола в документации роутера.
 
 ### Установка AmneziaWG DKMS модуля
 
@@ -301,33 +355,32 @@ lsmod | grep amneziawg
 
 Если `linux-headers-$(uname -r)` не найден — обнови ядро: `apt upgrade -y` и перезагрузись.
 
-### docker-compose.yml (пример)
+### Настройка wg-easy v15+
 
-### Генерация PASSWORD_HASH для wg-easy
+**В v15 НЕТ переменных `PASSWORD_HASH`, `WG_HOST`, `WG_DEFAULT_DNS` и т.п.** (это API v14).
+С `PASSWORD_HASH` в environment контейнер v15 вообще **откажется стартовать** — это защита
+от случайного автообновления с v14. Настройка теперь двумя способами:
 
-```bash
-# Генерирует bcrypt-хэш пароля (заменить YOUR_PASSWORD своим):
-docker run --rm -it ghcr.io/wg-easy/wg-easy wgpw 'YOUR_PASSWORD'
-# Вывод: PASSWORD_HASH='$2b$12$...'
-# Каждый символ $ нужно удвоить в docker-compose.yml: $2b → $$2b
-```
+1. **Веб-визард** при первом заходе в UI (логин/пароль админа, host, порт, DNS)
+2. **Unattended через `INIT_*`-переменные** — применяются только при ПЕРВОМ старте
+   (потом всё меняется через Admin Panel в UI)
 
-### docker-compose.yml (пример)
+### docker-compose.yml (пример, v15+)
 
 ```yaml
 services:
   wg-easy:
-    image: ghcr.io/wg-easy/wg-easy
+    image: ghcr.io/wg-easy/wg-easy:15
     container_name: wg-easy
     environment:
-      - LANG=en
-      - WG_HOST=<SERVER_IP>
-      - PASSWORD_HASH=<BCRYPT_HASH>   # каждый $ → $$
-      - WG_PORT=<WG_PORT>
-      - WG_DEFAULT_DNS=1.1.1.1,8.8.8.8
-      - WG_DEFAULT_ADDRESS=10.8.0.x
-      - WG_ALLOWED_IPS=0.0.0.0/0
-      - UI_TRAFFIC_STATS=true
+      - INIT_ENABLED=true
+      - INIT_USERNAME=admin
+      - INIT_PASSWORD=<ADMIN_PASSWORD>        # пароль веб-панели
+      - INIT_HOST=<SERVER_IP>                 # host в конфигах клиентов
+      - INIT_PORT=<WG_PORT>                   # UDP-порт WireGuard/AWG
+      - INIT_DNS=1.1.1.1,8.8.8.8
+      - EXPERIMENTAL_AWG=true                 # AmneziaWG; автодетект модуля, fallback на WG
+      # - OVERRIDE_AUTO_AWG=awg               # принудительно AWG (без fallback на WG)
     volumes:
       - wg-easy-data:/etc/wireguard
     ports:
@@ -345,19 +398,27 @@ volumes:
   wg-easy-data:
 ```
 
+`INIT_*`-переменные действуют группой: задал `INIT_PASSWORD` — задай и `INIT_USERNAME`,
+`INIT_HOST`, `INIT_PORT`. После первого старта убери `INIT_PASSWORD` из compose
+(секрет в файле не нужен — дальше всё через UI).
+
 **Важно:** UI привязан к `127.0.0.1` — доступ только через nginx reverse proxy.
+
+### Новое в wg-easy v15.3: Firewall
+
+Появилась функция ограничения доступа клиентов к конкретным сетям/хостам (аналог per-peer allowedIPs, но через UI). Настраивается в карточке клиента в панели. Полезно когда один клиент должен видеть только часть сети через VPN.
 
 ### nginx reverse proxy для wg-easy UI
 
 **Два варианта в зависимости от наличия домена:**
 
-#### Вариант А: с доменом (DOMAIN задан в SETUP_INFO.md)
+#### Вариант А: с доменом (DOMAIN задан)
 
 Сертификат получить через acme.sh (см. секцию 5). Затем:
 
 ```nginx
 server {
-    listen <WG_UI_PORT> ssl;
+    listen <EXTERNAL_UI_PORT> ssl;
     server_name <DOMAIN>;
 
     ssl_certificate /path/to/cert.pem;
@@ -393,7 +454,7 @@ sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
 
 ```nginx
 server {
-    listen <WG_UI_PORT> ssl;
+    listen <EXTERNAL_UI_PORT> ssl;
 
     ssl_certificate /etc/ssl/certs/wg-easy.crt;
     ssl_certificate_key /etc/ssl/private/wg-easy.key;
@@ -433,15 +494,14 @@ server {
 
 3x-ui — веб-панель для xray со встроенным xray-core. Все inbound'ы создаются через UI.
 
-### Актуальная версия 3x-ui
-
-Смотреть на https://github.com/MHSanaei/3x-ui/releases — взять последний тег, например `v2.8.11`.
-Всегда пинить конкретную версию (не `latest`) — это защитит от неожиданных breaking changes.
+**Версия:** бери актуальный последний релиз с https://github.com/MHSanaei/3x-ui/releases
+(подставь тег вместо `<VERSION>`). При **мажорном** переходе (например 2.x → 3.x) сначала
+прочитай changelog на breaking changes и сделай бэкап `./db` перед обновлением.
 
 ```yaml
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:<VERSION>  # Пинить версию! Например: v2.8.11
+    image: ghcr.io/mhsanaei/3x-ui:<VERSION>  # актуальный тег с releases
     container_name: 3x-ui
     volumes:
       - ./db:/etc/x-ui
@@ -561,7 +621,7 @@ sudo docker stats --no-stream
 
 ## 9. Pitfalls — что НЕ делать
 
-1. **Не забывай удвоить `$` в PASSWORD_HASH** — `$` → `$$` в docker-compose.yml
+1. **Не используй `PASSWORD_HASH`/`WG_HOST` с wg-easy v15+** — это API v14, контейнер с `PASSWORD_HASH` не стартует. Только `INIT_*` или веб-визард
 2. **Не закрывай SSH** до проверки что UFW не заблокировал SSH порт
 3. **Не используй `ufw reset`** — сбросит все правила включая SSH
 4. **Не правь конфиги WireGuard вручную** пока wg-easy запущен — перезапишет

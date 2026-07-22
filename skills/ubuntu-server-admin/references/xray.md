@@ -18,11 +18,13 @@
 | Транспорт | Домен | Порт | Flow | CDN | Когда использовать |
 |-----------|-------|------|------|-----|-------------------|
 | VLESS + TCP + Reality | Нет | 443 | `xtls-rprx-vision` | Нет | **Основной.** Лучший обход DPI |
-| VLESS + XHTTP + Reality | Нет | 2083 | **пусто** | Да | Резерв. CDN-совместимый (Cloudflare) |
-| VLESS + WS + TLS | Да | 8443 | **пусто** | Да | Fallback. Нужен домен + сертификат |
+| VLESS + XHTTP + Reality | Нет | 2083 | **пусто** | Да | **Резерв.** CDN-совместимый (Cloudflare) |
+| VLESS + WS + TLS | Да | 8443 | **пусто** | Да | ⚠️ **Устаревает → мигрируй на XHTTP.** Только для старых клиентов |
 
-**Стратегия:** Reality → XHTTP Reality (резерв) → WS+TLS (если Reality блокируется).
+**Стратегия:** Reality → XHTTP Reality (резерв) → WS+TLS (только если клиент не поддерживает XHTTP).
 Все транспорты можно запустить одновременно на разных портах.
+
+> **WebSocket устаревает:** команда xray официально помечает WS как deprecated и планирует его удалить в будущих версиях. XHTTP работает через CDN так же, как WS, но лучше скрывает трафик. Если используешь WS+TLS — запланируй миграцию на XHTTP.
 
 ### Совместимость клиентов
 
@@ -48,7 +50,7 @@
 ```yaml
 services:
   3x-ui:
-    image: ghcr.io/mhsanaei/3x-ui:<VERSION>  # Пинить версию!
+    image: ghcr.io/mhsanaei/3x-ui:<VERSION>  # актуальный тег с github releases; при мажорном переходе — читай changelog
     container_name: 3x-ui
     volumes:
       - ./db:/etc/x-ui
@@ -175,7 +177,11 @@ services:
 
 ---
 
-## VLESS + WebSocket + TLS
+## VLESS + WebSocket + TLS (устаревает)
+
+> ⚠️ **WebSocket официально помечен как deprecated в xray-core.** Планируется удаление в одной из будущих версий. Если нужен CDN-совместимый транспорт — используй XHTTP + Reality (см. раздел выше). WS+TLS оставляй только для клиентов, которые не поддерживают XHTTP.
+>
+> **Миграция WS → XHTTP:** создай новый XHTTP inbound (порт 2083, Flow пусто, отдельная пара Reality-ключей), раздай клиентам новый конфиг, затем удали WS inbound.
 
 Требует домен с A-записью на IP сервера и TLS-сертификат.
 
@@ -360,9 +366,9 @@ sudo docker ps --format "table {{.Names}}\t{{.Ports}}"
 curl -I https://<SNI_TARGET>
 ```
 
-**"VLESS (with no Flow) is deprecated"** — warning для XHTTP/WS inbound'ов. Это нормально, flow для них не нужен.
+**"VLESS (with no Flow) is deprecated"** — warning для XHTTP/WS inbound'ов. Пока работает, но апстрим ведёт реальную миграцию на «VLESS with flow» ([discussion #5568](https://github.com/XTLS/Xray-core/discussions/5568)) — при обновлении xray-core сверяйся с release notes. Там же на подходе встроенное VLESS Encryption (пост-квантовое).
 
-**"WebSocket transport is deprecated"** — xray рекомендует миграцию на XHTTP. WS всё ещё работает.
+**"WebSocket transport is deprecated"** — WS официально устаревает, xray планирует его удалить. Мигрируй на XHTTP: создай XHTTP+Reality inbound, раздай клиентам новый конфиг, удали WS inbound.
 
 **WS подключение не работает** — проверь:
 1. ALPN = только `http/1.1` (не h2!)
