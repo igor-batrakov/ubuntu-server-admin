@@ -561,6 +561,15 @@ find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete
 Паттерн: бэкап → pull → up → healthcheck → rollback при ошибке.
 Запуск по cron (раз в неделю). Логировать в `/var/log/<service>-update.log`.
 
+### Gotcha: watchtower
+
+Оригинальный `containrrr/watchtower` заброшен (последний релиз 2023) и падает на новых
+Docker-демонах с ошибкой `client version 1.25 is too old. Minimum supported API version is 1.44`.
+Признак: контейнер watchtower в бесконечном Restarting-loop, автообновления молча не работают.
+**Лечение:** заменить на поддерживаемый форк `nickfedor/watchtower` (drop-in совместим,
+те же аргументы). Урок общего вида: заброшенный образ может тихо умереть при обновлении
+Docker-демона — при диагностике проверяй `docker ps` на Restarting-контейнеры.
+
 ---
 
 ## 7. VPN-клиент на роутере (Keenetic и др.)
