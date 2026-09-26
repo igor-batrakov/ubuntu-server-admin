@@ -31,6 +31,20 @@ VPN для обхода DPI (AmneziaWG, xray), Docker за файрволом, �
 Проверено вживую на Ubuntu 26.04.1: kernel-модуль AmneziaWG 3.1 из PPA ставится и грузится
 на ядре 7.0; конфиги xray из справочника проходят `xray run -test` на актуальном xray-core.
 
+## Быстрый старт: проверить сервер
+
+```bash
+scp scripts/diagnose.sh <server>:/tmp/ && ssh -t <server> sudo bash /tmp/diagnose.sh
+```
+
+Скрипт только читает и печатает `[OK]` / `[!!]` / `[..]` с номером раздела SKILL.md. Ловит то,
+что годами не заметно: панели и базы в Docker, открытые в интернет в обход UFW; wg-easy,
+тихо откатившийся на обычный WireGuard без обфускации; модуль и tools AmneziaWG разных
+поколений; DKMS без заголовков текущего ядра; порт SSH, не применённый к `ssh.socket`;
+забытые таймеры отката; xray в Docker, работающий без вашего конфига; wg-easy v14, который
+не переживёт `docker compose pull`. Базовую защиту проверяет `diagnose.sh` из
+[new-vps-setup](https://github.com/igor-batrakov/new-vps-setup).
+
 ## Установка
 
 ```bash
@@ -75,6 +89,8 @@ ubuntu-server-admin/
 │   ├── release-upgrade.md        # апгрейд LTS → LTS
 │   ├── image-updates.md          # автообновление Docker-образов с откатом
 │   └── audit.md                  # Lynis, ssh-audit, Trivy
+├── scripts/
+│   └── diagnose.sh               # read-only диагностика уровня 3 с вердиктами
 ├── scenario/
 │   ├── KICKSTART.md              # первое сообщение агенту
 │   └── SETUP_INFO.example.md     # шаблон параметров сервера

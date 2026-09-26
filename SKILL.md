@@ -93,6 +93,18 @@ description: >
 
 **Выполни ПЕРВОЙ перед любой настройкой.** Сервер скорее всего уже частично настроен.
 
+**Одним запуском** — `scripts/diagnose.sh` в каталоге этого скилла: только читает, печатает `[OK]`/`[!!]`/`[..]` с номером
+раздела. Ловит то, что ломается молча: Docker-порты панелей в обход UFW, wg-easy, откатившийся
+на обычный WireGuard, tools и модуль AmneziaWG разных поколений, DKMS без заголовков ядра,
+Port SSH не применённый к `ssh.socket`, забытые таймеры отката, xray без своего конфига,
+3x-ui на 2053, wg-easy v14 и `INIT_PASSWORD` в окружении.
+
+```bash
+scp scripts/diagnose.sh <alias>:/tmp/ && ssh -t <alias> sudo bash /tmp/diagnose.sh
+```
+
+Базовую защиту (hardening, бэкапы, алерты) проверяет `diagnose.sh` из new-vps-setup. Вручную:
+
 ```bash
 # Система
 lsb_release -a && uname -r

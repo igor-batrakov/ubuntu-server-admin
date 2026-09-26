@@ -1,0 +1,46 @@
+name: Устарело или не сработало
+description: Команда, версия или совет из скилла не работает на вашем сервере
+labels: ["outdated"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AmneziaWG, wg-easy, xray и 3x-ui меняются каждые несколько недель — такие отчёты самые полезные.
+        Не вставляйте ключи, пароли, UUID клиентов и реальные IP: замените их на `<...>`.
+  - type: input
+    id: where
+    attributes:
+      label: Где в скилле
+      description: Файл и раздел, например «SKILL.md, раздел 4» или «references/xray.md, Выбор Target»
+    validations:
+      required: true
+  - type: input
+    id: ubuntu
+    attributes:
+      label: Ubuntu
+      description: Вывод `lsb_release -ds; uname -r`
+    validations:
+      required: true
+  - type: input
+    id: component
+    attributes:
+      label: Компонент и версия
+      description: Например `wg-easy v15.4.0`, `3x-ui v3.8.5`, `modinfo -F version amneziawg` → `3.1.20260812`
+  - type: textarea
+    id: what
+    attributes:
+      label: Что сделали и что получили
+      description: Команда из скилла и её вывод (как есть, с ошибкой)
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Что сработало (если нашли)
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: Вывод scripts/diagnose.sh (по желанию)
+      description: Только нужные секции; IP и имена хостов замените
+      render: text

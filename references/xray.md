@@ -184,6 +184,12 @@ services:
 «чужих», зашедших на fallback), `mldsa65Seed` (пост-квантовая подпись; target должен
 отдавать цепочку сертификатов > 3500 байт), `minClientVer`.
 
+**Минимальная версия клиента.** Новые сборки xray (в т.ч. внутри 3x-ui 3.x) при старте пишут
+`REALITY: The default minimal client version is Xray-core v26.3.27, other clients may be
+refused to connect` — клиенты на старом xray-core могут перестать подключаться после
+обновления сервера. Перед обновлением xray/3x-ui обновить клиенты или явно задать
+`minClientVer` ниже.
+
 ---
 
 ## VLESS + XHTTP + Reality
