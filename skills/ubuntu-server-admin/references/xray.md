@@ -3,9 +3,9 @@
 ## Содержание
 1. [Выбор транспорта](#выбор-транспорта)
 2. [Управление через 3x-ui](#управление-через-3x-ui)
-3. [VLESS + TCP + Reality](#vless--tcp--reality)
-4. [VLESS + XHTTP + Reality](#vless--xhttp--reality)
-5. [VLESS + WebSocket + TLS](#vless--websocket--tls)
+3. [VLESS + RAW + Reality](#vless--raw--reality)
+4. [VLESS + XHTTP + Reality](#vless--xhttp--reality) (и XHTTP + TLS через CDN)
+5. [VLESS + WebSocket + TLS](#vless--websocket--tls) — устарел
 6. [Несколько inbound'ов одновременно](#несколько-inboundов-одновременно)
 7. [Оптимальные настройки](#оптимальные-настройки)
 8. [Установка xray в Docker (без 3x-ui)](#установка-xray-в-docker-без-3x-ui)
@@ -15,35 +15,57 @@
 
 ## Выбор транспорта
 
-| Транспорт | Домен | Порт | Flow | CDN | Когда использовать |
-|-----------|-------|------|------|-----|-------------------|
-| VLESS + TCP + Reality | Нет | 443 | `xtls-rprx-vision` | Нет | **Основной.** Лучший обход DPI |
-| VLESS + XHTTP + Reality | Нет | 2083 | **пусто** | Да | **Резерв.** CDN-совместимый (Cloudflare) |
-| VLESS + WS + TLS | Да | 8443 | **пусто** | Да | ⚠️ **Устаревает → мигрируй на XHTTP.** Только для старых клиентов |
+Состояние на сентябрь 2026: стабильный xray-core — v26.3.27 (дальше идут pre-release),
+3x-ui — v3.8.x. Меняется быстро, сверяй [релизы xray](https://github.com/XTLS/Xray-core/releases).
 
-**Стратегия:** Reality → XHTTP Reality (резерв) → WS+TLS (только если клиент не поддерживает XHTTP).
-Все транспорты можно запустить одновременно на разных портах.
+| Транспорт | Домен | Порт | Flow | Через CDN | Когда использовать |
+|-----------|-------|------|------|-----------|-------------------|
+| VLESS + RAW(TCP) + Reality | Нет | 443 | `xtls-rprx-vision` | Нет | **Основной.** Лучший обход DPI |
+| VLESS + XHTTP + Reality | Нет | 2083 | **пусто** | **Нет** | **Резерв** с другим отпечатком трафика |
+| VLESS + XHTTP + TLS | Да | 8443 | **пусто** | Да | Когда IP сервера заблокирован и нужен CDN |
+| VLESS + WS + TLS | Да | 8443 | **пусто** | Да | ⚠️ Устарел. Только для клиентов без XHTTP |
 
-> **WebSocket устаревает:** команда xray официально помечает WS как deprecated и планирует его удалить в будущих версиях. XHTTP работает через CDN так же, как WS, но лучше скрывает трафик. Если используешь WS+TLS — запланируй миграцию на XHTTP.
+**Reality через CDN не ходит в принципе:** CDN сам завершает TLS, а Reality требует прямого
+соединения клиента с сервером. Через CDN (Cloudflare) идёт только XHTTP/WS с **обычным TLS
+на своём домене**. Порт 2083 в резервном Reality-inbound — просто второй порт, CDN тут ни при чём.
+
+**Reality не на 443:** с v26.3.27 xray пишет в лог предупреждение о повышенном риске
+блокировки IP. Резервный inbound на 2083 — осознанный компромисс; альтернатива — один
+Reality-inbound на 443 с fallback'ом на второй транспорт.
+
+**Стратегия:** RAW Reality → XHTTP Reality (резерв) → XHTTP+TLS через CDN (если заблокирован
+IP) → WS+TLS (только старые клиенты). Все можно держать одновременно на разных портах.
+
+> **WebSocket, gRPC, HTTPUpgrade** в xray помечены deprecated: работают, но не
+> рекомендуются, при старте пишут предупреждение «might be removed». В коде это пока
+> «NonRemovalDeprecated» (удалять не собираются), но строить новое на них не стоит.
+> Замена — XHTTP (H2/H3). Удалены совсем транспорты HTTP (h2) и QUIC. `tcp` переименован
+> в `raw`, старое имя принимается.
 
 ### Совместимость клиентов
 
-| Клиент | TCP Reality | XHTTP Reality | WS+TLS |
+| Клиент | RAW Reality | XHTTP Reality | WS+TLS |
 |--------|-----------|--------------|--------|
-| v2rayN 7+ | ✅ | ✅ | ✅ |
-| Nekobox / Nekoray | ✅ | ✅ | ✅ |
-| Hiddify | ✅ | ✅ | ✅ |
-| Streisand (iOS) | ✅ | ✅ | ✅ |
-| AmneziaVPN | ❌ | ❌ | ❌ |
-| Keenetic (роутер) | ❌ | ❌ | ❌ |
+| v2rayN 7+ (Windows/macOS/Linux) | ✅ | ✅ | ✅ |
+| Throne (преемник NekoRay, desktop) | ✅ | ✅ (через xray-core) | ✅ |
+| Hiddify | ✅ | ✅ (по changelog) | ✅ |
+| Streisand, Happ (iOS) | ✅ | ✅ | ✅ |
+| NekoBox (Android, sing-box) | ✅ | ❓ вероятно нет | ✅ |
+| AmneziaVPN 5.x | ✅ | ✅ | ❓ не проверено |
+| Keenetic (роутер) | ❌ нативно | ❌ | ❌ |
 
-> AmneziaVPN и роутеры — используй AmneziaWG (wg-easy), не xray.
+NekoRay заархивирован в декабре 2024 — ставить Throne. Keenetic умеет xray только через
+Entware + XKeen; для роутера проще AmneziaWG (wg-easy).
 
 ---
 
 ## Управление через 3x-ui
 
 3x-ui — веб-панель для xray с встроенным xray-core. Рекомендуемый способ управления.
+Ветка 3.x (с мая 2026): новый фронтенд, multi-node; в v3.3.0 API панели переехал под
+`/panel/api` (ломает скрипты, дёргавшие `/panel/setting`, `/panel/xray`); с v3.7.0 —
+автомиграции БД, поэтому **бэкап `./db` перед каждым обновлением**. Поддерживает XHTTP,
+VLESS Encryption и поле `target` для Reality.
 
 ### Установка
 
@@ -55,14 +77,21 @@ services:
     volumes:
       - ./db:/etc/x-ui
       - ./certs:/root/certs:ro
+    cap_add:                # как в upstream docker-compose.yml
+      - NET_ADMIN
+      - NET_RAW
     ports:
       - "<PANEL_PORT>:<PANEL_PORT>"
-      - "443:443"           # Reality
-      - "8443:8443"         # WS+TLS
+      - "443:443"           # RAW Reality
+      - "8443:8443"         # XHTTP/WS + TLS
       - "2083:2083"         # XHTTP Reality
     restart: unless-stopped
     network_mode: bridge
 ```
+
+**Docker-образ стартует с дефолтами `admin`/`admin`, порт 2053, путь `/`** (случайные значения
+генерирует только `install.sh`, не образ). До того как открыть порт наружу: сменить логин,
+пароль, порт и base path — первым делом, с доверенного IP.
 
 ### Критично: порты в docker-compose
 
@@ -82,9 +111,10 @@ services:
 
 ---
 
-## VLESS + TCP + Reality
+## VLESS + RAW + Reality
 
-Основной транспорт. Не требует домена. Маскируется под TLS крупных сайтов.
+Основной транспорт (RAW — прежнее TCP). Не требует домена. Для DPI выглядит как TLS-соединение
+с чужим сайтом (target); без ключа Reality сервер честно проксирует на этот сайт.
 
 ### Настройка в 3x-ui
 
@@ -96,18 +126,27 @@ services:
 | Decryption | `none` |
 | Транспорт | TCP (RAW) |
 | Безопасность | Reality |
-| uTLS | `chrome` |
-| Target | `www.microsoft.com:443` |
-| SNI | `www.microsoft.com` |
+| uTLS | `chrome` (дефолт) |
+| Target | `<TARGET>:443` — см. ниже |
+| SNI | `<TARGET>` |
 | Short IDs | Generate |
 | Ключи | Generate (новая пара) |
 | Sniffing | `http`, `tls` |
 
-### Выбор SNI Target
+### Выбор Target (сайт, под который маскируется Reality)
 
-Крупный сайт с TLS 1.3 + HTTP/2, доступный из страны сервера:
-- `www.microsoft.com`, `dl.google.com`, `www.cloudflare.com`
-- Проверка: `curl -I https://<TARGET>` с сервера
+Требования: иностранный сайт, TLS 1.3 + HTTP/2, без редиректа на главной. Лучше всего —
+сайт **в той же ASN (дата-центре), что и сервер**: трафик «к соседу» выглядит естественно.
+Подобрать такой: [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) по подсети сервера.
+
+**Не брать:**
+- `microsoft`, `apple`, `icloud`, домены `.ru`/`.ir`/`.cn` — с v26.3.27 xray пишет
+  предупреждение в лог: такие target'ы массово используются и легко детектятся;
+- сайты за Cloudflare (в т.ч. `www.cloudflare.com`) — сервер становится открытым
+  форвардером к CF.
+
+Приемлемый запасной вариант без сканирования — `dl.google.com`. Проверка с сервера:
+`curl -sI --http2 https://<TARGET> | head -1` → `HTTP/2 200` (не 301/302).
 
 ### Ручной конфиг (config.json)
 
@@ -121,10 +160,10 @@ services:
       "decryption": "none"
     },
     "streamSettings": {
-      "network": "tcp",
+      "network": "raw",
       "security": "reality",
       "realitySettings": {
-        "dest": "<SNI_TARGET>:443",
+        "target": "<SNI_TARGET>:443",
         "serverNames": ["<SNI_TARGET>"],
         "privateKey": "<PRIVATE_KEY>",
         "shortIds": ["<SHORT_ID>"]
@@ -139,11 +178,21 @@ services:
 }
 ```
 
+`dest` и `tcp` — старые имена `target` и `raw`, принимаются как алиасы. На клиенте поле
+публичного ключа теперь `password` (старое `publicKey` тоже принимается). Необязательные
+поля Reality: `limitFallbackUpload`/`limitFallbackDownload` (ограничение скорости для
+«чужих», зашедших на fallback), `mldsa65Seed` (пост-квантовая подпись; target должен
+отдавать цепочку сертификатов > 3500 байт), `minClientVer`.
+
 ---
 
 ## VLESS + XHTTP + Reality
 
-Новый транспорт xray 25+. Работает поверх HTTP chunked encoding. CDN-совместимый.
+Транспорт XHTTP есть с xray v24.10.31. Сервер отдаёт поток по H2/H3, клиент шлёт данные
+POST-пакетами (`packet-up`) или потоком (`stream-up`/`stream-one`). `mode: auto` выбирает
+сам: при Reality — `stream-one`. **Upstream советует задавать только `path`**, остальное
+(XMUX, padding) оставить по умолчанию. Через CDN этот вариант **не** работает — см. таблицу
+выбора транспорта.
 
 ### Настройка в 3x-ui
 
@@ -158,30 +207,40 @@ services:
 | Mode | `auto` |
 | Безопасность | Reality |
 | uTLS | `chrome` |
-| Target | `www.microsoft.com:443` |
-| SNI | `www.microsoft.com` |
-| Ключи | **Generate (новая пара**, независимая от TCP Reality!) |
+| Target | `<TARGET>:443` (тот же выбор, что для RAW) |
+| SNI | `<TARGET>` |
+| Ключи | **Generate (новая пара**, независимая от RAW Reality!) |
 | Short IDs | Generate |
 | Sniffing | `http`, `tls` |
 
-**Порт 2083** — CDN-совместимый HTTPS-порт (Cloudflare пропускает).
+### Отличия от RAW Reality
 
-### Отличия от TCP Reality
-
-| | TCP + Reality | XHTTP + Reality |
+| | RAW + Reality | XHTTP + Reality |
 |---|---|---|
 | Flow | `xtls-rprx-vision` | **пусто** |
-| Транспорт | TCP (RAW) | XHTTP |
-| CDN-совместимость | Нет | Да |
+| Транспорт | RAW (бывш. TCP) | XHTTP |
+| Через CDN | Нет | Нет (для CDN — XHTTP + TLS на своём домене) |
 | Reality ключи | Пара 1 | **Пара 2** (отдельная!) |
+
+### VLESS + XHTTP + TLS через CDN
+
+Вариант для случая, когда IP сервера заблокирован: домен проксируется через Cloudflare
+(«оранжевое облако»). Inbound: XHTTP, `path` длинный случайный, security **TLS** с сертификатом на домен (acme.sh
+ниже), flow пусто. Порт — из списка HTTPS-портов Cloudflare: 443, 2053, 2083, 2087, 2096,
+8443. Настройки CDN-режима (`xPaddingBytes`, параметры обфускации под CDN) upstream называет
+ещё не устоявшимися — начинать с дефолтов.
 
 ---
 
-## VLESS + WebSocket + TLS (устаревает)
+## VLESS + WebSocket + TLS
 
-> ⚠️ **WebSocket официально помечен как deprecated в xray-core.** Планируется удаление в одной из будущих версий. Если нужен CDN-совместимый транспорт — используй XHTTP + Reality (см. раздел выше). WS+TLS оставляй только для клиентов, которые не поддерживают XHTTP.
+> ⚠️ **WebSocket помечен в xray-core как deprecated** (работает, но не рекомендуется).
+> Для работы через CDN — XHTTP + TLS на том же домене (раздел выше). WS+TLS оставляй только
+> для клиентов, которые не поддерживают XHTTP.
 >
-> **Миграция WS → XHTTP:** создай новый XHTTP inbound (порт 2083, Flow пусто, отдельная пара Reality-ключей), раздай клиентам новый конфиг, затем удали WS inbound.
+> **Миграция WS → XHTTP:** создай XHTTP+TLS inbound на том же домене и сертификате (Flow
+> пусто), раздай клиентам новый конфиг, затем удали WS inbound. XHTTP+Reality заменой WS
+> не является, если WS шёл через CDN.
 
 Требует домен с A-записью на IP сервера и TLS-сертификат.
 
@@ -268,7 +327,7 @@ curl https://get.acme.sh | sh -s email=<EMAIL>
 ```yaml
 ports:
   - "<PANEL_PORT>:<PANEL_PORT>"
-  - "443:443"      # TCP Reality
+  - "443:443"      # RAW Reality
   - "8443:8443"    # WS+TLS
   - "2083:2083"    # XHTTP Reality
 ```
@@ -289,11 +348,20 @@ sudo ufw allow 2083/tcp comment 'xray XHTTP Reality'
 
 | Транспорт | Flow |
 |-----------|------|
-| TCP + Reality | `xtls-rprx-vision` (обязательно) |
+| RAW + Reality | `xtls-rprx-vision` (обязательно) |
 | XHTTP + Reality | **пусто** |
 | WebSocket + TLS | **пусто** |
 
-**Flow используется ТОЛЬКО с TCP-транспортом.** Для XHTTP и WebSocket — всегда пусто.
+**Flow используется ТОЛЬКО с RAW-транспортом** (иначе ошибка `XTLS only supports TLS and
+REALITY directly`). Для XHTTP и WebSocket — пусто. Исключение — VLESS Encryption.
+
+### VLESS Encryption (опционально)
+
+С v25.9.5 VLESS умеет собственное шифрование (ML-KEM-768 + X25519, пост-квантовое): поле
+`decryption` на сервере и `encryption` на клиенте вместо `none`, ключи — `xray vlessenc`.
+Upstream советует включать вместе с Vision; с ней flow допустим и на XHTTP/WS. Несовместима
+с fallbacks. Для обычной связки Reality достаточно `"decryption": "none"` — включать, только
+если все клиенты её поддерживают.
 
 ### Sniffing
 
@@ -305,7 +373,8 @@ sudo ufw allow 2083/tcp comment 'xray XHTTP Reality'
 
 ### uTLS
 
-`chrome` — наиболее распространённый fingerprint. Для WS+TLS менее критичен (TLS свой, не Reality).
+`chrome` — дефолт и самый распространённый fingerprint. `unsafe` для Reality запрещён.
+Для WS+TLS менее критичен (TLS свой, не Reality).
 
 ---
 
@@ -316,11 +385,13 @@ sudo ufw allow 2083/tcp comment 'xray XHTTP Reality'
 ```yaml
 services:
   xray:
-    image: ghcr.io/xtls/xray-core
+    image: ghcr.io/xtls/xray-core:<VERSION>
     container_name: xray
+    # entrypoint образа — сам xray с `-confdir /usr/local/etc/xray/`: конфиг монтировать
+    # именно туда. С другим путём контейнер стартует БЕЗ конфига и ничего не слушает
     volumes:
-      - ./config:/etc/xray
-      - ./certs:/etc/xray/certs:ro
+      - ./config:/usr/local/etc/xray:ro
+      - ./certs:/usr/local/etc/xray-certs:ro
     ports:
       - "443:443"
       - "8443:8443"
@@ -329,16 +400,24 @@ services:
 
 ### Генерация ключей
 
+Entrypoint образа — уже `xray`, поэтому подкоманда идёт сразу после имени образа
+(`… xray-core xray uuid` падает с `unknown command`):
+
 ```bash
-docker run --rm ghcr.io/xtls/xray-core xray uuid
-docker run --rm ghcr.io/xtls/xray-core xray x25519
+docker run --rm ghcr.io/xtls/xray-core uuid
+docker run --rm ghcr.io/xtls/xray-core x25519
 openssl rand -hex 4   # Short ID
 ```
+
+Вывод `x25519` в новых версиях: `PrivateKey:` — в `privateKey` сервера, `Password (PublicKey):` —
+публичный ключ для клиента (в клиентах и 3x-ui поле может называться `password` или
+`publicKey`), `Hash32:` — не нужен.
 
 ### Проверка конфига
 
 ```bash
-docker run --rm -v ./config:/etc/xray ghcr.io/xtls/xray-core xray run -test -config /etc/xray/config.json
+docker run --rm -v ./config:/usr/local/etc/xray:ro ghcr.io/xtls/xray-core \
+  run -test -config /usr/local/etc/xray/config.json     # ожидаемо: Configuration OK.
 ```
 
 ---
@@ -366,9 +445,15 @@ sudo docker ps --format "table {{.Names}}\t{{.Ports}}"
 curl -I https://<SNI_TARGET>
 ```
 
-**"VLESS (with no Flow) is deprecated"** — warning для XHTTP/WS inbound'ов. Пока работает, но апстрим ведёт реальную миграцию на «VLESS with flow» ([discussion #5568](https://github.com/XTLS/Xray-core/discussions/5568)) — при обновлении xray-core сверяйся с release notes. Там же на подходе встроенное VLESS Encryption (пост-квантовое).
+**"VLESS (with no Flow) is deprecated"** — было в pre-release января–марта 2026, убрано
+в v26.3.27 (PR #5671). Если видишь — xray старый или pre-release той поры; обнови.
 
-**"WebSocket transport is deprecated"** — WS официально устаревает, xray планирует его удалить. Мигрируй на XHTTP: создай XHTTP+Reality inbound, раздай клиентам новый конфиг, удали WS inbound.
+**Предупреждение про Reality не на 443 или про target (`microsoft`/`apple`/…)** — с v26.3.27.
+Не ошибка, но совет по делу: см. «Выбор Target» и таблицу транспортов.
+
+**"The feature WebSocket transport … is deprecated … Please migrate to XHTTP H2 & H3"** —
+печатается при каждом старте с WS-inbound'ом. Работает, но это сигнал переходить на XHTTP:
+порядок миграции — в разделе WebSocket (XHTTP+TLS на том же домене, если WS шёл через CDN).
 
 **WS подключение не работает** — проверь:
 1. ALPN = только `http/1.1` (не h2!)

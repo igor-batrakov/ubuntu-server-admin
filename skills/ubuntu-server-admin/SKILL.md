@@ -33,8 +33,8 @@ description: >
 │  │   wg-easy        │   │   3x-ui (xray-core внутри)      │ │
 │  │   (Docker)       │   │   (Docker)                      │ │
 │  │                  │   │                                 │ │
-│  │ UDP :WG_PORT     │   │ TCP :443  (VLESS+TCP+Reality)   │ │
-│  │ (AmneziaWG)      │   │ TCP :8443 (VLESS+WS+TLS)       │ │
+│  │ UDP :WG_PORT     │   │ TCP :443  (VLESS+RAW+Reality)   │ │
+│  │ (AmneziaWG)      │   │ TCP :8443 (VLESS+XHTTP/WS+TLS)  │ │
 │  │                  │   │ TCP :2083 (VLESS+XHTTP+Reality) │ │
 │  │ TCP :UI_PORT     │   │ TCP :PANEL (веб-панель)         │ │
 │  │ (внутренний)     │   │                                 │ │
@@ -47,9 +47,10 @@ description: >
 
 **Когда что использовать:**
 - **AmneziaWG (wg-easy)** — основной VPN, обфускация против DPI (РКН), роутеры Keenetic
-- **VLESS + TCP + Reality** — обход DPI без домена, маскировка под TLS крупных сайтов
-- **VLESS + XHTTP + Reality** — CDN-совместимый, новый транспорт xray 25+
-- **VLESS + WS + TLS** — fallback с доменом, через nginx или напрямую
+- **VLESS + RAW(TCP) + Reality** — обход DPI без домена, маскировка под TLS чужого сайта
+- **VLESS + XHTTP + Reality** — резерв без домена с другим отпечатком трафика (через CDN не ходит)
+- **VLESS + XHTTP + TLS** — со своим доменом, через CDN, когда IP сервера заблокирован
+- **VLESS + WS + TLS** — устарел, только для клиентов без XHTTP
 
 ---
 
@@ -794,12 +795,13 @@ services:
 
 ### Краткая навигация по xray.md
 
-- **Выбор транспорта** — когда что использовать
-- **VLESS + TCP + Reality** — основной, без домена
-- **VLESS + XHTTP + Reality** — CDN-совместимый, новый
-- **VLESS + WebSocket + TLS** — fallback с доменом
-- **Оптимальные настройки** — ALPN, flow, sniffing
-- **Диагностика** — логи, порты, типичные ошибки
+- **Выбор транспорта** — когда что использовать, почему Reality не ходит через CDN, клиенты
+- **VLESS + RAW + Reality** — основной, без домена; выбор target (не microsoft/apple/Cloudflare)
+- **VLESS + XHTTP + Reality / + TLS через CDN** — резерв и обход блокировки IP
+- **VLESS + WebSocket + TLS** — устаревший fallback с доменом
+- **Оптимальные настройки** — flow, VLESS Encryption, sniffing, ключи
+- **Установка xray в Docker** — путь конфига в образе `/usr/local/etc/xray`
+- **Диагностика** — логи, порты, типичные предупреждения xray
 
 ---
 

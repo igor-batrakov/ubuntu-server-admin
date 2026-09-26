@@ -64,7 +64,7 @@ INSTALL_XRAY=yes
 XRAY_REALITY=yes
 
 # VLESS + XHTTP + Reality (порт 2083) — РЕЗЕРВ
-# CDN-совместимый (Cloudflare). Новый транспорт xray 25+.
+# Не требует домена, другой отпечаток трафика. Через CDN не ходит (для CDN нужен домен и TLS).
 XRAY_XHTTP=yes
 
 # VLESS + WebSocket + TLS (порт 8443) — FALLBACK
