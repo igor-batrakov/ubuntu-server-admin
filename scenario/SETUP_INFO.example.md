@@ -1,5 +1,5 @@
 # Server Setup Info
-# Скопируй этот файл: cp SETUP_INFO.example.md SETUP_INFO.md
+# Скопируй этот файл в корень репозитория: cp scenario/SETUP_INFO.example.md SETUP_INFO.md
 # и заполни все поля в КОПИИ перед запуском Claude.
 # SETUP_INFO.md в .gitignore — реальные IP и пароли не попадут в git.
 # Строки начинающиеся с # — комментарии, их менять не нужно.
