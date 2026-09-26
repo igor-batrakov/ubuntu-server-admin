@@ -2,18 +2,26 @@
 name: ubuntu-server-admin
 description: >
   Системное администрирование Ubuntu Linux серверов: установка, настройка, hardening,
-  VPN (AmneziaWG 2.0 + wg-easy, xray через 3x-ui с VLESS + Reality/XHTTP для обхода DPI),
-  файрвол UFW, Docker, nginx, автобэкапы, диагностика.
+  VPN (AmneziaWG + wg-easy, xray через 3x-ui с VLESS + Reality/XHTTP для обхода DPI),
+  файрвол UFW, Docker, nginx, автобэкапы, апгрейд LTS, аудит безопасности, диагностика.
   Используй при любых задачах: настройка Ubuntu сервера, VPN туннели, UFW, SSH hardening,
-  AmneziaWG, AmneziaWG 2.0, WireGuard, wg-easy, xray, 3x-ui, Docker, обход DPI, split tunneling,
+  AmneziaWG, WireGuard, wg-easy, xray, 3x-ui, Docker, обход DPI, split tunneling,
   диагностика сетевых проблем на Linux, подключение роутеров к VPN.
 ---
 
 # Ubuntu Server Administration + VPN
 
-> **Целевая ОС: Ubuntu 24.04 LTS.** Ubuntu 26.04 LTS пока НЕ брать за основу — DKMS-модуль
-> amneziawg не собирается на её ядре ([issue #167](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/167)).
-> Пересмотреть, когда issue закроют.
+> **Целевая ОС: Ubuntu 24.04 или 26.04 LTS.** Различия 26.04, которые ломают привычные
+> команды: `sudo-rs` (другие тексты ошибок), `/tmp` в tmpfs, отказы SSH пишет `sshd-session`
+> (см. fail2ban). DKMS-модуль AmneziaWG на ядре 26.04 (7.0) собирается: в PPA есть пакеты
+> для 26.04 с сентября 2026, сборка из git master проверена. Старое «на 26.04 не собирается»
+> ([issue #167](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/167))
+> относилось к пакету 2025 года. Установка — раздел 4.
+>
+> **Уровень.** Этот скилл — продвинутый уровень: VPN, DOCKER-USER, смена порта SSH, апгрейд
+> LTS, аудит, автообновление образов. Базовая настройка «для новичка» с гейтом от «я заперся»,
+> режимами sudo и чеклистом — в [new-vps-setup](https://github.com/igor-batrakov/new-vps-setup);
+> здесь базовые шаги даны кратко.
 
 ## Архитектура: несколько VPN на одном сервере
 
@@ -48,18 +56,37 @@ description: >
 ## Базовые принципы
 
 Перед ЛЮБЫМ изменением конфига:
-1. Сделай бекап: `sudo cp /path/to/config /path/to/config.bak.$(date +%F-%H%M)`
+1. Сделай бекап **вне каталогов `*.d`**:
+   `sudo mkdir -p /root/config-bak && sudo cp -a /etc/ssh /root/config-bak/ssh.$(date +%F-%H%M)`.
+   Копия рядом с оригиналом в `*.d` опасна: `sshd_config.d/x.bak.conf` подхватится как конфиг,
+   а на `.bak` в `apt.conf.d` apt ругается при каждом запуске
 2. Проверь текущее состояние: `sudo systemctl status <service>` или `sudo docker ps`
-3. После изменения — проверь результат: `sudo docker logs <container> --tail 50`
+3. После изменения — проверь результат по содержимому (`sshd -T`, `ufw status`, логи), а не по
+   коду возврата
 4. Если сломалось — восстанови бекап и перезапусти
 
 **Никогда не закрывай SSH до проверки что UFW не заблокировал SSH порт.**
 
 ### Подключение к серверу
 
-Первый вход (пароль): `ssh root@<SERVER_IP>` — пароль пользователь вводит сам в терминале.
+Первый вход (пароль): `ssh root@<SERVER_IP>` — пароль пользователь вводит сам, **в отдельном
+окне терминала**. У инструмента Bash агента нет TTY, у префикса `!` в Claude Code CLI тоже:
+приглашение пароля не появится, будет `Permission denied`. То же для sudo-пароля и passphrase.
 После настройки ключа: `ssh <USERNAME>@<SERVER_IP>` или через alias в `~/.ssh/config`.
-Если MCP SSH доступен — можно использовать его, но `ssh` через bash тоже работает.
+
+**sudo с паролем и агент.** Агент не может ввести sudo-пароль, поэтому режим выбирает
+пользователь, один раз, в начале:
+- **A (по умолчанию):** агент готовит скрипт, пользователь запускает его сам в отдельном окне:
+  `ssh -t <alias> sudo bash /tmp/s.sh`.
+- **B:** временный NOPASSWD отдельным файлом с таймером самоудаления (ниже, «NOPASSWD sudo»),
+  снять в конце работ. Постоянный NOPASSWD «чтобы агенту было удобно» не предлагать.
+
+Проверка, есть ли у агента sudo без пароля: `sudo -n true 2>&1 | head -1`. Пусто — есть.
+Иначе `sudo: a password is required` (классический sudo) или
+`sudo: interactive authentication is required` (sudo-rs, Ubuntu 26.04).
+
+**Особенности 26.04:** `/tmp` — tmpfs, очищается при перезагрузке и живёт в RAM: логи
+апгрейда, распаковку бэкапов и большие архивы — в `/var/tmp` или `/var/log`.
 
 ---
 
@@ -72,8 +99,16 @@ description: >
 lsb_release -a && uname -r
 free -h && df -h && nproc
 
-# SSH
-grep -rE 'PermitRootLogin|PasswordAuthentication' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/
+# SSH — эффективные значения, не файлы (в sshd_config.d действует «first match wins»).
+# Если в конфиге есть блоки Match, sshd -T требует -C user=root,host=localhost,addr=127.0.0.1
+sudo sshd -T | grep -iE '^(port|permitrootlogin|passwordauthentication|pubkeyauthentication) '
+ls /etc/ssh/sshd_config.d/
+sudo grep -rn NOPASSWD /etc/sudoers /etc/sudoers.d/ 2>/dev/null   # кому хостер дал sudo без пароля
+
+# Автообновления безопасности — нужны все три условия, одного конфига мало
+dpkg-query -W -f='${Status}\n' unattended-upgrades 2>/dev/null   # install ok installed
+systemctl is-enabled apt-daily.timer apt-daily-upgrade.timer      # enabled, enabled
+grep Unattended-Upgrade /etc/apt/apt.conf.d/20auto-upgrades       # "1"
 
 # Файрвол
 sudo ufw status verbose
@@ -143,6 +178,22 @@ NTP не действовала — отсюда правило проверят
 sudo apt update && sudo apt upgrade -y
 ```
 
+**Автообновления безопасности.** Образы хостеров бывают с удалённым пакетом
+`unattended-upgrades` (`dpkg-query` показывает `deinstall ok config-files`) и выключенными
+таймерами `apt-daily*` при лежащем «правильном» `20auto-upgrades` — сверяй три условия из
+раздела 0. Включение без TTY (`dpkg-reconfigure` интерактивно не пройдёт):
+
+```bash
+sudo apt install unattended-upgrades -y
+echo 'unattended-upgrades unattended-upgrades/enable_auto_updates boolean true' | sudo debconf-set-selections
+sudo dpkg-reconfigure -f noninteractive unattended-upgrades
+sudo systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
+sudo unattended-upgrade --dry-run --debug 2>&1 | tail -5
+```
+
+Автоперезагрузка (`Unattended-Upgrade::Automatic-Reboot`) — решение пользователя: на сервере
+с VPN ночной reboot рвёт туннели на минуту-две.
+
 ### Ubuntu Pro / ESM (опционально)
 
 Security-патчи для пакетов из `universe` (fail2ban, restic, certbot, часть nginx-модулей) на
@@ -157,8 +208,7 @@ pro status                                # esm-apps и esm-infra — enabled
 ```
 
 Строки `ESMApps`/`ESM` в `/etc/apt/apt.conf.d/50unattended-upgrades` без подписки просто не
-действуют, трогать их не нужно. В `new-vps-setup` этой темы нет намеренно: у целевого
-новичка подписки, как правило, не будет, а лишний `[!!]` в диагностике только сбивает.
+действуют, трогать их не нужно.
 
 ### Обновление релиза (LTS → LTS)
 
@@ -178,7 +228,8 @@ curl -s https://changelogs.ubuntu.com/meta-release | grep -E "^(Dist|Version|Sup
 sudo sed -i 's/^Prompt=lts/Prompt=normal/' /etc/update-manager/release-upgrades
 sudo do-release-upgrade -c            # должно предложить новый релиз
 tmux new-session -d -s upg "sudo DEBIAN_FRONTEND=noninteractive \
-  do-release-upgrade -m server -f DistUpgradeViewNonInteractive > /tmp/upg.log 2>&1"
+  do-release-upgrade -m server -f DistUpgradeViewNonInteractive > /var/log/upg.log 2>&1"
+# лог не в /tmp: на 26.04 это tmpfs, и после ребута разбирать будет нечего
 ```
 
 Обязательное вокруг:
@@ -212,7 +263,7 @@ sudo usermod -aG sudo <USERNAME>
 Override с `ListenStream` был нужен только в 22.10–23.10.
 Проверять через VNC-консоль провайдера на случай потери доступа!
 
-Рекомендуемые параметры (в `/etc/ssh/sshd_config.d/99-hardening.conf`):
+Рекомендуемые параметры — в `/etc/ssh/sshd_config.d/00-hardening.conf`:
 ```
 PermitRootLogin no
 PasswordAuthentication no
@@ -223,16 +274,25 @@ ClientAliveInterval 300
 ClientAliveCountMax 2
 ```
 
+**Почему `00-`, а не `99-`.** В `sshd_config.d/` файлы читаются по алфавиту и действует
+«first match wins». `50-cloud-init.conf` хостера с `PasswordAuthentication yes` перебивает
+любой `99-…`, а `00-…` идёт первым — чужой файл трогать не нужно, и откат сводится к удалению
+одного своего файла. Сервер уже настроен по старой схеме (`99-hardening.conf` плюс правленный
+`50-cloud-init.conf`)? Работает — не мигрируй. Если всё же меняешь, таймер отката должен
+возвращать весь каталог из бэкапа, а не удалять один файл: иначе откат оставит
+`50-cloud-init.conf` с `yes` без `99-…`.
+
 Убедись что ключ добавлен ПЕРЕД отключением пароля:
 ```bash
 cat /home/<USERNAME>/.ssh/authorized_keys
 sudo sshd -t && sudo systemctl restart ssh
+sudo sshd -T | grep -iE '^(permitrootlogin|passwordauthentication) '   # обе — no
 # Проверь подключение в НОВОЙ сессии прежде чем закрывать текущую!
 ```
 
-**Gotcha:** файл `/etc/ssh/sshd_config.d/50-cloud-init.conf` может содержать `PasswordAuthentication yes`, перезаписывая hardening. Проверяй и исправляй!
-
-**Gotcha:** проверяй РЕЗУЛЬТАТ через `sudo sshd -T | grep -iE 'permitroot|passwordauth'` (эффективные значения), а не только файлы — в `sshd_config.d/` действует «first match wins».
+Проверяй РЕЗУЛЬТАТ через `sshd -T` (эффективные значения), а не содержимое файлов. При
+блоках `Match` в конфиге `sshd -T` без контекста падает — добавь
+`-C user=root,host=localhost,addr=127.0.0.1`.
 
 #### Dead-man switch при рискованных правках sshd
 
@@ -243,7 +303,7 @@ sudo sshd -t && sudo systemctl restart ssh
 
 Поэтому при рискованных правках (ограничение алгоритмов, смена аутентификации) порядок:
 
-1. бэкап `/etc/ssh`;
+1. бэкап `/etc/ssh` в `/root/config-bak/` (не внутрь `sshd_config.d/`);
 2. `sudo sshd -t -f /tmp/candidate.conf` — проверка синтаксиса БЕЗ применения;
 3. **сначала взвести таймер авто-отката, только потом класть файл** — если положить файл
    первым, окно между «применилось» и «таймер взведён» уже может оказаться фатальным;
@@ -251,11 +311,19 @@ sudo sshd -t && sudo systemctl restart ssh
 5. отменить таймер.
 
 ```bash
-sudo systemd-run --unit=ssh-rollback --on-active=300 \
-  /bin/sh -c 'rm -f /etc/ssh/sshd_config.d/<новый>.conf; systemctl reload ssh.service 2>/dev/null || true'
+# Абсолютное время (--on-calendar), НЕ --on-active: относительный таймер перевзводится
+# каждым daemon-reload (любой apt install между «взвёл» и «проверил»), и откат молча уезжает
+T=$(date -d '+5 min' '+%F %T')
+sudo systemd-run --unit=ssh-rollback --on-calendar="$T" \
+  /bin/sh -c 'rm -f /etc/ssh/sshd_config.d/<новый>.conf; systemctl daemon-reload; systemctl restart ssh.socket ssh.service'
 # ... кладём файл, проверяем вход НОВОЙ сессией ...
 sudo systemctl stop ssh-rollback.timer
 ```
+
+Тот же приём для `ufw enable`: `sudo systemd-run --unit=ufw-rollback --on-calendar="$T" /usr/sbin/ufw disable`.
+`Unit ssh-rollback.timer already exists` — прошлый таймер ещё висит: остановить и взвести
+заново. Таймер транзитный и **не переживает reboot**: если сервер перезагрузился между
+«взвёл» и «проверил», отката нет — иди в консоль провайдера.
 
 `sshd -t` ловит синтаксис, но **НЕ ловит** «ни один клиент не сможет договориться»
 об алгоритмах. Последний рубеж — VNC-консоль провайдера.
@@ -264,12 +332,25 @@ sudo systemctl stop ssh-rollback.timer
 
 **Политика ключей:** тип `ed25519` (не RSA); один ключ на сервер; имя `<сервер>_<устройство>` (тип в имени НЕ указывать — он уже внутри ключа); с passphrase + хранение в Keychain (macOS).
 
-**NOPASSWD sudo** (если нужен autosudo вместо sudo-с-паролем):
+**NOPASSWD sudo — временно, на время настройки (режим B).** Файл проверяется `visudo` ДО того,
+как попадёт в `sudoers.d` (файл с ошибкой ломает sudo целиком), и снимается сам через 4 часа:
 ```bash
-echo "<user> ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-<user>-nopasswd
-chmod 440 /etc/sudoers.d/90-<user>-nopasswd
-visudo -cf /etc/sudoers.d/90-<user>-nopasswd   # проверка синтаксиса
+#!/bin/bash
+# sudo-temp-on.sh <USERNAME> — запускает пользователь: ssh -t <alias> sudo bash /tmp/sudo-temp-on.sh <USERNAME>
+set -euo pipefail
+U="${1:?пользователь}"
+F=/etc/sudoers.d/90-setup-temp
+printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$U" > /root/90-setup-temp
+visudo -cf /root/90-setup-temp
+install -m 440 -o root -g root /root/90-setup-temp "$F"
+systemctl stop sudo-temp-expire.timer 2>/dev/null || true
+EXP=$(date -d '+4 hours' '+%F %T')          # абсолютное время, см. dead-man switch
+systemd-run --unit=sudo-temp-expire --on-calendar="$EXP" /bin/rm -f "$F"
+echo "NOPASSWD для $U до $EXP"
 ```
+Снять в конце работ: `sudo rm -f /etc/sudoers.d/90-setup-temp && sudo systemctl stop sudo-temp-expire.timer`,
+затем `sudo -k && sudo -n true 2>&1 | head -1` должен снова просить пароль. После reboot
+таймера нет, а файл остался — проверь `systemctl list-timers sudo-temp-expire.timer`.
 
 **Безопасная миграция/добавление ключа — порядок «добавить новый → проверить → удалить старый» (НЕ запираясь):**
 ```bash
@@ -299,16 +380,43 @@ sed -i '/<old-key-comment>/d' ~/.ssh/authorized_keys
 sudo apt install fail2ban -y
 ```
 
-Рекомендуемая конфигурация:
-- **sshd jail**: bantime 6ч, findtime 30мин, maxretry 4
-- **recidive jail**: бан на неделю после 3 повторных банов
-- **bantime.increment**: прогрессивный рост (factor=2, max 7 дней)
-- **ignoreip**: добавь свои доверенные IP
+`/etc/fail2ban/jail.d/local.conf` (выложить файлом, не `echo | tee`):
+```ini
+[DEFAULT]
+# свои постоянные адреса (дом, офис, VPN-выход) — спросить у пользователя
+ignoreip = 127.0.0.1/8 ::1 <TRUSTED_IP>
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 7d
+
+[sshd]
+enabled = true
+# Образ без rsyslog: /var/log/auth.log нет, и jail с файловым backend падает
+# с «Have not found any log file for sshd jail». Пакет 26.04 ставит systemd сам
+# (defaults-debian.conf), явная строка — страховка для образов и версий, где это не так
+backend = systemd
+# port = <SSH_PORT>   # если порт SSH сменён
+bantime = 6h
+findtime = 30m
+maxretry = 4
+
+[recidive]
+# читает /var/log/fail2ban.log — backend systemd сюда НЕ ставить
+enabled = true
+bantime = 7d
+findtime = 1d
+maxretry = 3
+```
 
 ```bash
-sudo systemctl enable fail2ban && sudo systemctl start fail2ban
+sudo systemctl enable --now fail2ban
 sudo fail2ban-client status sshd
+# Фильтр реально видит отказы? На свежем сервере нули в status ничего не доказывают:
+sudo fail2ban-regex systemd-journal[journalflags=1] 'sshd[mode=normal]' | tail -3
 ```
+
+Ноль совпадений у сервера, который час висит в интернете, = фильтр не видит логи. На 26.04
+отказы пишет процесс `sshd-session`, а не `sshd`; jail ловит их через `_SYSTEMD_UNIT=ssh.service`.
 
 ---
 
@@ -322,8 +430,11 @@ sudo ufw default allow outgoing
 sudo ufw allow <SSH_PORT>/tcp comment 'SSH'
 # ВАЖНО: убедись что SSH порт добавлен ПЕРЕД enable!
 sudo ufw status numbered   # проверь что SSH есть в списке
-sudo ufw enable
+sudo ufw --force enable    # без --force и без TTY enable молча отменяется
+sudo ufw status verbose    # Status: active и SSH в списке
 ```
+
+Перед `enable` — таймер отката `ufw disable` (см. dead-man switch в разделе 1).
 
 ### Порты VPN — открыты для всех
 
@@ -419,71 +530,91 @@ sudo systemctl restart docker
 
 ## 4. wg-easy + AmneziaWG
 
-### AmneziaWG — обфускация WireGuard
+### AmneziaWG — версии протокола
 
-**AmneziaWG 2.0** (выпущен 2026-05-05) — фундаментально новая архитектура:
-- Маскируется под реальные UDP-протоколы (DNS, QUIC, SIP) вместо «шума»
-- Динамические диапазоны заголовков (не статичные, как в 1.x)
-- Случайный padding во всех типах WG-сообщений — значительно сложнее детектировать
+Состояние на сентябрь 2026 — меняется быстро, перед установкой сверяй релизы
+[модуля](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/tags),
+[wg-easy](https://github.com/wg-easy/wg-easy/releases) и
+[клиента](https://github.com/amnezia-vpn/amnezia-client/releases).
 
-AWG 1.x: добавлял junk-пакеты поверх WireGuard, скрывая сигнатуру. В 2026 году этого уже недостаточно против современного DPI.
+| Версия | Что добавляет (ключи в `[Interface]`) |
+|---|---|
+| 1.0 | `Jc/Jmin/Jmax` (junk-пакеты), `S1/S2`, статичные `H1–H4` |
+| 1.5 | + `I1–I5` — сигнатурные пакеты (CPS), мимикрия под DNS/QUIC/SIP |
+| 2.0 | + `S3/S4`, диапазоны `H1–H4` (`H1 = 100-200`) |
+| 3.0 | + `HeaderProtectionKey` (генерируется `awg genkey`, требует `S1–S4 ≥ 12`), `ContentPaddingAddition`, таймеры диапазонами |
+| 3.1 | + `RandomTrailers`, `DisableCookies` |
 
-**Требования:**
-- DKMS модуль `amneziawg` на хосте
-- `EXPERIMENTAL_AWG=true` в wg-easy (в v16 будет включён по умолчанию)
-- Клиент **AmneziaVPN ≥ 4.8.12.9** для поддержки AWG 2.0 (старые версии работают только с AWG 1.x)
+Версия конфига определяется по ключам: `HeaderProtectionKey` и другие ключи 3.x → 3.x;
+`S3`+`S4` → 2.0; только `I1` → 1.5; ничего из этого → 1.0.
 
-**Где AWG 2.0 уже есть, а где нет (июль 2026):**
-- ⚠️ **amneziawg-go** (userspace, официальный) — демон принимает и CPS-пакеты I1–I5,
-  и диапазоны заголовков, но **через раздачу native `.conf` достижима только 1.5**:
-  клиент AmneziaVPN не honorit H-диапазоны из импортированного конфига, хендшейк
-  не проходит (проверено 24.07.2026). Полную 2.0 даёт, по-видимому, только родной
-  мастер Amnezia self-hosted. Рецепт и диагностика — `references/amneziawg-userspace.md`.
-- ✅ Клиенты AmneziaVPN ≥ 4.8.12.9 (desktop, Android)
-- ❌ **kernel-модуль** — в master только протокол 1.x, исходники 2.0 не опубликованы
-  ([issue #161](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/161))
-- ⚠️ **официальный wg-easy** для AWG использует ТОЛЬКО kernel-модуль (без модуля откат
-  на обычный WireGuard, НЕ на amneziawg-go) → в связке wg-easy+DKMS доступен AWG 1.x
-  плюс диапазоны H1–H4 (wg-easy v15.3+). Полноценный 2.0 с CPS в wg-easy пока недоступен.
+**Совместимость:**
+- Новая реализация понимает старые конфиги: нулевое/пустое значение выключает механизм.
+- Старый клиент конфиг с ключами 3.x **отвергает**, а несовпадение `HeaderProtectionKey`
+  ломает хендшейк молча. Все параметры, кроме `Jc/Jmin/Jmax`, у сервера и клиента
+  обязаны совпадать.
+- **Поколения `amneziawg-tools` и модуля должны совпадать:** tools 1.0.x с модулем 3.x дают
+  `attribute type 14 has an invalid length` ([wg-easy #2723](https://github.com/wg-easy/wg-easy/issues/2723)).
+  Со свежим модулем из PPA бери wg-easy ≥ v15.4.0.
 
-**Совместимость:** реализация 2.0 обратно совместима с 1.x-конфигами — сигнатурные
-пакеты активируются только если в конфиге заданы I1–I5. Для включения мимикрии нужны
-обновлённые конфиги + клиенты ≥ 4.8.12.9; старые 1.x-конфиги продолжают работать.
+**Кто что поддерживает:**
+- **Kernel-модуль** (PPA и git master) — 3.1. Номер пакета `amneziawg-dkms 1.0.0` не значит
+  «протокол 1.0».
+- **amneziawg-go** (userspace) — 3.1. Рецепт сервера без модуля —
+  `references/amneziawg-userspace.md`.
+- **wg-easy v15.4.0** — в UI до 2.0 (`I1–I5`, `S3/S4`, диапазоны `H`); ключи 3.x есть только в
+  master/nightly. Нужен `EXPERIMENTAL_AWG=true`. Автодетект смотрит только на kernel-модуль:
+  без него откат на обычный WireGuard.
+- **Клиент AmneziaVPN** — 3.0 с 5.0.0.5, 3.1 с 5.0.1.5. Self-hosted мастер Amnezia ставит 3.1.
+- **Keenetic** — до 2.0, см. раздел 7.
 
-**Если нужна обфускация без kernel-модуля** — сервер на `amneziawg-go`: пошаговый
-рецепт, грамматика CPS-тегов, что не включать и как проверять сигнатуру —
-`references/amneziawg-userspace.md`. Там же диагностика «клиент не подключается»
-(`invalid initiation` = клиентский конфиг, а не сервер). Как только выйдет
-kernel-модуль 2.0 или wg-easy научится amneziawg-go — вернуться к связке wg-easy.
+**Что выбирать:** для wg-easy — 2.0 (максимум, который даёт стабильный релиз), с `I1` для
+мимикрии. 3.x — когда нужен и сервер, и все клиенты на 3.x-реализациях (роутеры Keenetic 3.x
+не умеют).
 
-**Keenetic Ultra** поддерживает AmneziaWG нативно (KeeneticOS 4.1+), уточняй версию протокола в документации роутера.
+### Установка kernel-модуля AmneziaWG
 
-### Установка AmneziaWG DKMS модуля
+Выполнить на хосте (не внутри контейнера). Если включён Secure Boot
+(`mokutil --sb-state` → `enabled`), неподписанный DKMS-модуль не загрузится; на VPS обычно
+выключен.
 
-Выполнить на хосте (не внутри контейнера):
+**Вариант 1 — PPA (официальный путь, есть пакеты для 24.04 и 26.04):**
 
 ```bash
-# Зависимости
-sudo apt install -y dkms git linux-headers-$(uname -r) build-essential
+sudo apt install -y software-properties-common linux-headers-$(uname -r)
+sudo add-apt-repository -y ppa:amnezia/ppa
+sudo apt install -y amneziawg-dkms          # amneziawg-tools нужен, только если awg на хосте
+dkms status                                 # amneziawg/1.0.0, <ядро>: installed
+```
 
-# Скачать исходники
-sudo git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module \
-  /usr/src/amneziawg-1.0.0
+**Вариант 2 — из исходников** (PPA недоступен или нужен коммит новее пакета). `dkms.conf`
+лежит в `src/`, поэтому клон репозитория целиком в `/usr/src/amneziawg-1.0.0` не работает
+(`Could not locate dkms.conf`) — исходники кладёт `make dkms-install`:
 
-# Установить через DKMS (автоматически пересобирается при обновлении ядра)
-sudo dkms add amneziawg/1.0.0
-sudo dkms build amneziawg/1.0.0
-sudo dkms install amneziawg/1.0.0
+```bash
+sudo apt install -y dkms git build-essential linux-headers-$(uname -r)
+git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module /opt/amneziawg-src
+cd /opt/amneziawg-src/src && sudo make dkms-install
+sudo dkms add -m amneziawg -v 1.0.0
+sudo dkms build -m amneziawg -v 1.0.0
+sudo dkms install -m amneziawg -v 1.0.0
+```
 
-# Загрузить модуль и сделать постоянным
+Проверено сборкой на заголовках ядра Ubuntu 26.04 (`7.0.0-34-generic`, коммит `4569c4c`,
+26.09.2026). Этот путь не обновляется сам: после `git pull` — `dkms remove` старой версии,
+затем все шаги заново.
+
+Дальше для обоих вариантов:
+
+```bash
 sudo modprobe amneziawg
 echo "amneziawg" | sudo tee /etc/modules-load.d/amneziawg.conf
-
-# Проверка
 lsmod | grep amneziawg
 ```
 
-Если `linux-headers-$(uname -r)` не найден — обнови ядро: `apt upgrade -y` и перезагрузись.
+Если `linux-headers-$(uname -r)` не найден — ядро обновилось без перезагрузки:
+`sudo apt upgrade -y` и перезагрузись. DKMS пересобирает модуль при каждом новом ядре; после
+обновления ядра проверь `dkms status`, что для него модуль `installed`.
 
 ### Настройка wg-easy v15+
 
@@ -842,21 +973,23 @@ Docker-демона — при диагностике проверяй `docker p
 
 ### AmneziaWG на Keenetic
 
-KeeneticOS поддерживает AmneziaWG нативно, но **с порогом по версии протокола**:
-- **1.5 / 2.0** — только с KeeneticOS **5.1 Alpha 3**. Ниже импорт `.conf` падает
-  с `invalid H1 value` — и это читается как «файл битый», хотя дело в прошивке.
+KeeneticOS поддерживает AmneziaWG нативно, но **с порогом по версии протокола**
+([инструкция Amnezia](https://docs.amnezia.org/documentation/instructions/keenetic-os-awg/)):
+- **1.5 / 2.0** — с KeeneticOS **5.1** (сейчас стабильная ветка; впервые — 5.1 Alpha 3).
+  Ниже импорт `.conf` падает с `invalid H1 value` — и это читается как «файл битый», хотя
+  дело в прошивке.
 - **1.0 (legacy)** — с 4.2 Alpha 2, но эта версия ловится блокировками.
-- **3.1** — не поддерживается вовсе (это формат клиента Amnezia Premium).
+- **3.x** — не поддерживается (на сентябрь 2026). Конфиги Amnezia Premium выдаются в 3.x
+  и в 2.0 не конвертируются — для роутера нужен свой сервер с конфигом ≤ 2.0.
 
-Версия определяется по самому `.conf`: `S3`+`S4`+`I1` в `[Interface]` → 2.0;
-только `I1` → 1.5; ничего из этого → 1.0.
+Версия определяется по самому `.conf` — таблица в разделе 4.
 
 1. Создай клиента в wg-easy → скачай .conf
 2. Keenetic → VPN → AmneziaWG → Add tunnel → импортируй .conf
 
-Параметры обфускации (`Jc/Jmin/Jmax/S1/S2/H1–H4/I1`) в веб-панели Keenetic **не видны
-и не редактируются** — они импортируются из файла и живут скрыто. Задать их вручную
-можно только через rci-API. Разбор — `~/projects/infrastructure/keenetic/TUNNELS.md`.
+Параметры обфускации (`Jc/Jmin/Jmax/S1–S4/H1–H4/I1`) в веб-панели Keenetic **не видны
+и не редактируются** — они импортируются из файла и живут скрыто. Посмотреть или задать их
+вручную можно через CLI/rci-API роутера (`interface WireguardN wireguard asc …`).
 
 ### Gotcha: админ-панели недоступны через VPN
 
@@ -1040,7 +1173,8 @@ docker pull (контейнер продолжает работать на ст�
 6. **Не используй порт 443 одновременно** для xray и nginx без SNI-роутинга
 7. **ssh.socket (24.04/26.04)** — после смены Port в sshd_config нужен `daemon-reload` + `restart ssh.socket`, простой `restart ssh` порт не сменит
 8. **Docker обходит UFW** — для ограничения Docker-портов используй DOCKER-USER iptables
-9. **50-cloud-init.conf** может перезаписать SSH hardening — проверяй sshd_config.d/
+9. **Не называй drop-in sshd `99-…`** — `50-cloud-init.conf` с `PasswordAuthentication yes` его
+   перебьёт (first match wins). Свой файл — `00-hardening.conf`, итог — по `sshd -T`
 10. **wg-easy v15 IPv6** — не трогай ipv6_address/ipv6_cidr в DB, отключай через allowed_ips
 11. **Не запускай длинные операции в foreground SSH, если SSH идёт через VPN этого же
     сервера.** Обновление `docker-ce` перезапускает демон → перезапускается VPN-контейнер →
@@ -1069,3 +1203,7 @@ docker pull (контейнер продолжает работать на ст�
     статика, за которой backend мёртв. Проверять запросом, который обязан сходить в БД
     (напр. логин с заведомо неверными данными → в ответе должна быть логика приложения,
     а не ошибка соединения).
+15. **Не взводи таймер отката через `--on-active`** — каждый `daemon-reload` (любой `apt install`)
+    перевзводит его заново, и откат молча уезжает. Только `--on-calendar` с абсолютным временем.
+16. **Не бери tools и модуль AmneziaWG разных поколений** — `awg`/wg-easy с tools 1.0.x против
+    модуля 3.x дают `attribute type 14 has an invalid length`. Со свежим модулем — wg-easy ≥ v15.4.0.

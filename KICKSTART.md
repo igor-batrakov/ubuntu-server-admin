@@ -13,17 +13,21 @@
 
 ### Шаг 1 — SSH доступ по ключу (САМЫЙ ВАЖНЫЙ шаг)
 
-1. Скажи мне IP сервера и какую команду выполнить для первого подключения по паролю —
-   я введу пароль сам в терминале
+1. Дай мне команду `ssh-copy-id` для первого подключения по паролю — я выполню её
+   в отдельном окне терминала и введу пароль сам (в твоём Bash и через `!` пароль не ввести)
 2. После подключения: создай пользователя `USERNAME` из SETUP_INFO.md, добавь SSH ключ из `SSH_PUBLIC_KEY_FILE`
-3. Проверь вход по ключу — открой новое соединение и убедись что работает
-4. **Только после успешной проверки** — отключи парольный доступ (PasswordAuthentication no)
-5. Исправь `/etc/ssh/sshd_config.d/50-cloud-init.conf` если там `PasswordAuthentication yes`
+3. Предложи мне режим работы с sudo (A — я запускаю твои скрипты сам, B — временный NOPASSWD
+   с таймером), как описано в skill'е
+4. Проверь вход по ключу — открой новое соединение и убедись что работает
+5. **Только после успешной проверки** — отключи парольный доступ (PasswordAuthentication no)
+   через `/etc/ssh/sshd_config.d/00-hardening.conf` с таймером отката; `50-cloud-init.conf`
+   не трогай — `00-` читается раньше него. Итог проверь по `sshd -T`
 
 ### Шаг 2 — SSH hardening + fail2ban
 
-- Параметры hardening в `/etc/ssh/sshd_config.d/99-hardening.conf`
-- fail2ban: jails sshd + recidive, ignoreip из TRUSTED_IP в SETUP_INFO.md
+- Параметры hardening в том же `/etc/ssh/sshd_config.d/00-hardening.conf`
+- fail2ban: jails sshd (`backend = systemd`) + recidive, ignoreip из TRUSTED_IP в SETUP_INFO.md
+- Проверь автообновления безопасности (три условия из раздела 0 skill'а)
 
 ### Шаг 3 — Система
 
@@ -44,7 +48,8 @@
 
 ### Шаг 5 — Компоненты (по SETUP_INFO.md)
 
-- Если `INSTALL_AWG=yes` → wg-easy + AmneziaWG DKMS модуль
+- Если `INSTALL_AWG=yes` → AmneziaWG kernel-модуль (PPA) + wg-easy; версию протокола выбрать
+  по таблице в skill'е (для wg-easy и роутеров Keenetic — не выше 2.0)
 - Если `INSTALL_XRAY=yes` → 3x-ui с транспортами из XRAY_* переменных
 - Если нужен домен (XRAY_WS=yes или DOMAIN задан) → сертификат через acme.sh
 
