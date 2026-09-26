@@ -566,6 +566,8 @@ sudo systemctl restart docker
 - **wg-easy v15.4.0** — в UI до 2.0 (`I1–I5`, `S3/S4`, диапазоны `H`); ключи 3.x есть только в
   master/nightly. Нужен `EXPERIMENTAL_AWG=true`. Автодетект смотрит только на kernel-модуль:
   без него откат на обычный WireGuard.
+- **3x-ui ≥ v3.7.0** — встроенный AmneziaWG 3.1 в userspace (по release notes; здесь не
+  проверялся). Вариант, если 3x-ui уже стоит, а модуль ставить нельзя.
 - **Клиент AmneziaVPN** — 3.0 с 5.0.0.5, 3.1 с 5.0.1.5. Self-hosted мастер Amnezia ставит 3.1.
 - **Keenetic** — до 2.0, см. раздел 7.
 
