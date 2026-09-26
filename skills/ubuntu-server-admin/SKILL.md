@@ -188,9 +188,11 @@ sudo usermod -aG sudo <USERNAME>
 
 ### SSH hardening
 
-**Важно: Ubuntu 24.04 использует ssh.socket (socket activation).**
-Порт в `sshd_config` игнорируется — нужно менять в `ssh.socket` override.
-Для смены порта: `sudo systemctl edit ssh.socket` → добавить ListenStream.
+**Важно: Ubuntu 22.10+ (24.04, 26.04) запускает sshd через ssh.socket (socket activation).**
+`Port` по-прежнему задаётся в `sshd_config`/`sshd_config.d/` — его читает генератор
+`sshd-socket-generator` — но `restart ssh` порт не сменит. После правки:
+`sudo systemctl daemon-reload && sudo systemctl restart ssh.socket`, проверка `ss -tlnp | grep sshd`.
+Override с `ListenStream` был нужен только в 22.10–23.10.
 Проверять через VNC-консоль провайдера на случай потери доступа!
 
 Рекомендуемые параметры (в `/etc/ssh/sshd_config.d/99-hardening.conf`):
@@ -415,8 +417,11 @@ AWG 1.x: добавлял junk-пакеты поверх WireGuard, скрыва
 - Клиент **AmneziaVPN ≥ 4.8.12.9** для поддержки AWG 2.0 (старые версии работают только с AWG 1.x)
 
 **Где AWG 2.0 уже есть, а где нет (июль 2026):**
-- ✅ **amneziawg-go** (userspace, официальный) — полный 2.0: CPS/сигнатурные пакеты I1–I5,
-  диапазоны заголовков. Её использует Amnezia self-hosted.
+- ⚠️ **amneziawg-go** (userspace, официальный) — демон принимает и CPS-пакеты I1–I5,
+  и диапазоны заголовков, но **через раздачу native `.conf` достижима только 1.5**:
+  клиент AmneziaVPN не honorit H-диапазоны из импортированного конфига, хендшейк
+  не проходит (проверено 24.07.2026). Полную 2.0 даёт, по-видимому, только родной
+  мастер Amnezia self-hosted. Рецепт и диагностика — `references/amneziawg-userspace.md`.
 - ✅ Клиенты AmneziaVPN ≥ 4.8.12.9 (desktop, Android)
 - ❌ **kernel-модуль** — в master только протокол 1.x, исходники 2.0 не опубликованы
   ([issue #161](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/161))
@@ -428,9 +433,11 @@ AWG 1.x: добавлял junk-пакеты поверх WireGuard, скрыва
 пакеты активируются только если в конфиге заданы I1–I5. Для включения мимикрии нужны
 обновлённые конфиги + клиенты ≥ 4.8.12.9; старые 1.x-конфиги продолжают работать.
 
-**Если нужен полный AWG 2.0 уже сейчас** — не wg-easy, а сервер на amneziawg-go
-(проще всего через приложение Amnezia self-hosted). Как только выйдет kernel-модуль 2.0
-или wg-easy научится amneziawg-go — вернуться к связке wg-easy.
+**Если нужна обфускация без kernel-модуля** — сервер на `amneziawg-go`: пошаговый
+рецепт, грамматика CPS-тегов, что не включать и как проверять сигнатуру —
+`references/amneziawg-userspace.md`. Там же диагностика «клиент не подключается»
+(`invalid initiation` = клиентский конфиг, а не сервер). Как только выйдет
+kernel-модуль 2.0 или wg-easy научится amneziawg-go — вернуться к связке wg-easy.
 
 **Keenetic Ultra** поддерживает AmneziaWG нативно (KeeneticOS 4.1+), уточняй версию протокола в документации роутера.
 
@@ -818,9 +825,21 @@ Docker-демона — при диагностике проверяй `docker p
 
 ### AmneziaWG на Keenetic
 
-Keenetic Ultra поддерживает AmneziaWG нативно (KeeneticOS 4.1+).
+KeeneticOS поддерживает AmneziaWG нативно, но **с порогом по версии протокола**:
+- **1.5 / 2.0** — только с KeeneticOS **5.1 Alpha 3**. Ниже импорт `.conf` падает
+  с `invalid H1 value` — и это читается как «файл битый», хотя дело в прошивке.
+- **1.0 (legacy)** — с 4.2 Alpha 2, но эта версия ловится блокировками.
+- **3.1** — не поддерживается вовсе (это формат клиента Amnezia Premium).
+
+Версия определяется по самому `.conf`: `S3`+`S4`+`I1` в `[Interface]` → 2.0;
+только `I1` → 1.5; ничего из этого → 1.0.
+
 1. Создай клиента в wg-easy → скачай .conf
 2. Keenetic → VPN → AmneziaWG → Add tunnel → импортируй .conf
+
+Параметры обфускации (`Jc/Jmin/Jmax/S1/S2/H1–H4/I1`) в веб-панели Keenetic **не видны
+и не редактируются** — они импортируются из файла и живут скрыто. Задать их вручную
+можно только через rci-API. Разбор — `~/projects/infrastructure/keenetic/TUNNELS.md`.
 
 ### Gotcha: админ-панели недоступны через VPN
 
@@ -1002,7 +1021,7 @@ docker pull (контейнер продолжает работать на ст�
 4. **Не правь конфиги WireGuard вручную** пока wg-easy запущен — перезапишет
 5. **Не забывай добавлять порты** в docker-compose.yml при создании inbound'ов в 3x-ui
 6. **Не используй порт 443 одновременно** для xray и nginx без SNI-роутинга
-7. **Ubuntu 24.04 ssh.socket** — Port в sshd_config игнорируется, менять через socket override
+7. **ssh.socket (24.04/26.04)** — после смены Port в sshd_config нужен `daemon-reload` + `restart ssh.socket`, простой `restart ssh` порт не сменит
 8. **Docker обходит UFW** — для ограничения Docker-портов используй DOCKER-USER iptables
 9. **50-cloud-init.conf** может перезаписать SSH hardening — проверяй sshd_config.d/
 10. **wg-easy v15 IPv6** — не трогай ipv6_address/ipv6_cidr в DB, отключай через allowed_ips

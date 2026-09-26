@@ -1,6 +1,20 @@
-# vps-setup
+# ubuntu-server-admin
 
-Интерактивная настройка VPS с нуля через Claude Code: SSH hardening, AmneziaWG VPN, xray (VLESS+Reality), автобэкапы.
+Скилл `ubuntu-server-admin` для Claude Code и интерактивный сценарий настройки VPS вокруг него:
+SSH hardening, AmneziaWG VPN, xray (VLESS+Reality), Docker, nginx, автобэкапы, диагностика,
+аудит, апгрейд LTS → LTS.
+
+> **Это третий, продвинутый уровень.** Если сервер настраивается впервые или нужен безопасный
+> минимум и «прод без усложнений» — начинай с [`new-vps-setup`](https://github.com/igor-batrakov/new-vps-setup):
+> уровень 1 «сервер можно оставить включённым», уровень 2 «это прод», с гейтом от «я заперся»,
+> диагностикой с вердиктами и runbook'ами. Сюда переходи, когда тот чеклист пройден, а нужны
+> VPN, DOCKER-USER, смена порта SSH с dead-man switch, аудит Lynis/ssh-audit, автообновление
+> образов с откатом.
+
+**Сам скилл** — [`skills/ubuntu-server-admin/`](skills/ubuntu-server-admin/): `SKILL.md` плюс
+`references/xray.md` и `references/amneziawg-userspace.md`. Подключается симлинком в
+`~/.claude/skills/ubuntu-server-admin` (не копией: копии расходятся). Ниже — сценарий
+интерактивной настройки, который этот скилл использует.
 
 ## Что нужно подготовить ДО запуска
 
@@ -23,7 +37,7 @@ curl ifconfig.me
 
 ```bash
 # Склонируй этот репозиторий и перейди в него
-cd vps-setup
+git clone https://github.com/igor-batrakov/ubuntu-server-admin.git && cd ubuntu-server-admin
 
 # 1. Создай локальную копию параметров и заполни все поля:
 cp SETUP_INFO.example.md SETUP_INFO.md
