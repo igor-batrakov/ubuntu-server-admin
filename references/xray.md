@@ -119,6 +119,27 @@ Bearer-токен: `docker exec 3x-ui /app/x-ui setting -getApiToken` (пере�
 - в объекте клиента `tgId` — число (`0`), не строка: со строкой `add` падает с
   `cannot unmarshal string … tgId`;
 - после изменений: `POST /server/restartXrayService`; итог — `GET /server/getConfigJson`.
+- в `GET /inbounds/list` поле `settings` в v3 — уже объект, не строка JSON.
+
+### Встроенный AmneziaWG 3.1 (3x-ui ≥ v3.7)
+
+amneziawg-go поверх userspace-стека gVisor в процессе панели: без kernel-модуля, без root-доступа
+к сети хоста. UDP-порт inbound'а опубликовать в compose (`"<PORT>:<PORT>/udp"`) и открыть в UFW.
+Подсеть по умолчанию `10.8.1.0/24` — с wg-easy (`10.8.0.0/24`) не пересекается.
+
+Через API — как кнопка в UI:
+- `POST /inbounds/add` с `"protocol": "amneziawg"`, нужным `port` и **`"settings": "{}"`** — панель
+  сама сгенерирует полный набор 3.1 (S3/S4, H1–H4, I1 `<r N>`, HeaderProtectionKey,
+  ContentPaddingAddition, таймеры диапазонами, RandomTrailers, DisableCookies) и ключи сервера;
+- клиента — `POST /clients/add` с `{"client": {"email": …, "enable": true, "keepAlive": 25, …},
+  "inboundIds": [<id>]}`: ключи и адрес из подсети выдаются сами. Клиенты в v3 — отдельные
+  сущности: повторный `add` с тем же email падает, для идемпотентности сначала проверять;
+- `.conf` клиента панель собирает **в браузере** (готового endpoint'а нет): из
+  `settings.server.*` и клиента — `[Interface]` с `Jc…S4`, `H1–H4`, `I1`, ключами 3.x
+  (`RandomTrailers = on`, `DisableCookies = on`), `MTU` = заданный или `1420 − S4`.
+
+Клиенту нужен AmneziaWG 3.1: AmneziaVPN ≥ 5.0.1.5; Keenetic 3.x не умеет.
+Проверено 3.1-клиентом amneziawg-go: внешний IP сервера, HTTPS через туннель.
 
 ### Критично: порты в docker-compose
 

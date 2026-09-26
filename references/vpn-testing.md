@@ -40,6 +40,28 @@ docker run --rm --cap-add NET_ADMIN --device /dev/net/tun \
   уходят в туннель и теряются — хендшейк есть, а «внешний IP» пустой.
 - В образе нет `curl` — `wget` из busybox.
 
+### Клиент для AmneziaWG 3.x
+
+В образе wg-easy v15.4 — `amneziawg-go`/`amneziawg-tools` **3.0**: ключей 3.1 (`RandomTrailers`,
+`DisableCookies`) они не знают. Для проверки inbound'а 3.1 (например, встроенного в 3x-ui)
+собрать свой клиентский образ из тех же тегов, что в Dockerfile wg-easy master:
+
+```dockerfile
+FROM alpine:3 AS build
+RUN apk add --no-cache linux-headers build-base go git bash && \
+    git clone --depth 1 --branch v3.1.20260812 https://github.com/amnezia-vpn/amneziawg-tools.git && \
+    git clone --depth 1 --branch v3.1.20260828 https://github.com/amnezia-vpn/amneziawg-go && \
+    cd amneziawg-go && make && cd ../amneziawg-tools/src && make
+FROM alpine:3
+RUN apk add --no-cache bash iproute2 iptables ip6tables wget
+COPY --from=build /amneziawg-go/amneziawg-go /usr/bin/amneziawg-go
+COPY --from=build /amneziawg-tools/src/wg /usr/bin/awg
+COPY --from=build /amneziawg-tools/src/wg-quick/linux.bash /usr/bin/awg-quick
+ENTRYPOINT ["sh"]
+```
+Запуск — как выше (`--cap-add NET_ADMIN --device /dev/net/tun --sysctl …src_valid_mark=1 --dns 1.1.1.1`).
+Теги сверять с актуальными релизами.
+
 ### Снимок провода: видна ли сигнатура I1
 
 На сервере, **до** запуска клиента:
