@@ -587,6 +587,12 @@ sudo apt install -y amneziawg-dkms          # amneziawg-tools нужен, тол
 dkms status                                 # amneziawg/1.0.0, <ядро>: installed
 ```
 
+Проверено на Ubuntu 26.04.1 (ядро `7.0.0-34-generic`, 26.09.2026): пакет собрался через DKMS,
+`modinfo amneziawg` → `version: 3.1.20260812`, `ip link add … type amneziawg` работает.
+Пакет тянет `build-essential`, и тот может подтянуть обновление `libc6` — откатить установку
+простым `purge` всего нового потом не получится. DKMS собирает модуль под **каждое** ядро с
+заголовками, включая старые, ещё не удалённые (`apt autoremove --purge` их убирает).
+
 **Вариант 2 — из исходников** (PPA недоступен или нужен коммит новее пакета). `dkms.conf`
 лежит в `src/`, поэтому клон репозитория целиком в `/usr/src/amneziawg-1.0.0` не работает
 (`Could not locate dkms.conf`) — исходники кладёт `make dkms-install`:
