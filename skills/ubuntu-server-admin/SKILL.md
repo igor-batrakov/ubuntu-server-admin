@@ -143,6 +143,23 @@ NTP не действовала — отсюда правило проверят
 sudo apt update && sudo apt upgrade -y
 ```
 
+### Ubuntu Pro / ESM (опционально)
+
+Security-патчи для пакетов из `universe` (fail2ban, restic, certbot, часть nginx-модулей) на
+LTS приходят только через ESM Apps, то есть с подпиской Ubuntu Pro. Личная подписка
+бесплатна на несколько машин, токен — https://ubuntu.com/pro/dashboard. Условия и лимит
+машин менялись, сверяй на сайте перед тем, как обещать «бесплатно».
+
+```bash
+sudo apt install ubuntu-pro-client -y     # в минимальных образах пакета может не быть
+sudo pro attach <TOKEN>
+pro status                                # esm-apps и esm-infra — enabled
+```
+
+Строки `ESMApps`/`ESM` в `/etc/apt/apt.conf.d/50unattended-upgrades` без подписки просто не
+действуют, трогать их не нужно. В `new-vps-setup` этой темы нет намеренно: у целевого
+новичка подписки, как правило, не будет, а лишний `[!!]` в диагностике только сбивает.
+
 ### Обновление релиза (LTS → LTS)
 
 Штатный путь открывается только с выходом `.1` (для 26.04 — 26.04.1), поэтому сразу
