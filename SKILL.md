@@ -457,18 +457,56 @@ net.ipv4.conf.all.send_redirects=0
 
 ### DOCKER-USER iptables (ограничение Docker-портов)
 
-Docker обходит UFW! Для ограничения доступа к Docker-портам нужны правила в цепочке DOCKER-USER.
+Docker обходит UFW: опубликованный порт контейнера доступен всем, даже если в UFW его нет.
+Для VPN-портов это нормально, для панелей и баз данных — нет. Ограничение — в цепочке
+DOCKER-USER. Ставить **до** первого старта контейнера, чтобы панель ни минуты не была открыта.
 
-Скрипт `/usr/local/bin/docker-user-rules.sh`:
+`/usr/local/sbin/docker-user-acl.sh` — своя цепочка, повторный запуск не плодит дубли:
 ```bash
 #!/bin/bash
-iptables -I DOCKER-USER -p tcp --dport <PORT> -s <TRUSTED_IP> -j ACCEPT
-iptables -I DOCKER-USER -p tcp --dport <PORT> -j REJECT
-# IPv6:
-ip6tables -I DOCKER-USER -p tcp --dport <PORT> -j REJECT
+PORTS="<PANEL_PORT>"               # опубликованные порты панелей, через пробел
+TRUSTED="<IP_1> <IP_2>"
+for ipt in iptables ip6tables; do
+  command -v $ipt >/dev/null || continue
+  $ipt -N PANEL-ACL 2>/dev/null
+  $ipt -F PANEL-ACL
+  for p in $PORTS; do
+    if [ $ipt = iptables ]; then
+      for ip in $TRUSTED; do $ipt -A PANEL-ACL -p tcp -s $ip -m conntrack --ctdir ORIGINAL --ctorigdstport $p -j RETURN; done
+    fi
+    $ipt -A PANEL-ACL -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport $p -j REJECT --reject-with tcp-reset
+  done
+  $ipt -C DOCKER-USER -j PANEL-ACL 2>/dev/null || $ipt -I DOCKER-USER -j PANEL-ACL
+done
 ```
 
-Персистентность через systemd сервис (After=docker.service).
+- `--ctorigdstport` — опубликованный порт **до** DNAT; `--dport` в FORWARD видит уже порт
+  внутри контейнера и при несовпадении портов молча не срабатывает.
+- **`--ctdir ORIGINAL` обязателен.** Без него REJECT совпадает и с **ответами** контейнера
+  (источник 172.x не из списка доверенных): панель не открывается даже с разрешённого адреса.
+  Альтернатива — отдельное разрешение для `172.16.0.0/12`.
+
+Юнит `/etc/systemd/system/docker-user-acl.service` — правила переприменяются при каждом
+рестарте Docker и после перезагрузки:
+```ini
+[Unit]
+Description=DOCKER-USER ACL for published admin panels
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/docker-user-acl.sh
+
+[Install]
+WantedBy=docker.service
+```
+
+Проверка — с двух сторон: с доверенного адреса панель открывается, с любого другого сервера
+`timeout 5 bash -c 'echo > /dev/tcp/<SERVER_IP>/<PANEL_PORT>'` не проходит, а VPN-порты
+проходят. Счётчики: `sudo iptables -L PANEL-ACL -v -n`.
 
 ---
 
@@ -543,10 +581,12 @@ sudo systemctl restart docker
 - **amneziawg-go** (userspace) — 3.1. Рецепт сервера без модуля —
   `references/amneziawg-userspace.md`.
 - **wg-easy v15.4.0** — в UI до 2.0 (`I1–I5`, `S3/S4`, диапазоны `H`); ключи 3.x есть только в
-  master/nightly. Нужен `EXPERIMENTAL_AWG=true`. Автодетект смотрит только на kernel-модуль:
+  master/nightly. **Сам при первом старте генерирует 1.0** — поднять вручную (ниже, «Поднять
+  обфускацию до 2.0»). Нужен `EXPERIMENTAL_AWG=true`. Автодетект смотрит только на kernel-модуль:
   без него откат на обычный WireGuard.
-- **3x-ui ≥ v3.7.0** — встроенный AmneziaWG 3.1 в userspace (по release notes; здесь не
-  проверялся). Вариант, если 3x-ui уже стоит, а модуль ставить нельзя.
+- **3x-ui ≥ v3.7.0** — встроенный AmneziaWG 3.1: amneziawg-go поверх userspace-стека gVisor
+  прямо в процессе панели, без модуля (по upstream compose; здесь не проверялся). Вариант, если
+  3x-ui уже стоит, а модуль ставить нельзя.
 - **Клиент AmneziaVPN** — 3.0 с 5.0.0.5, 3.1 с 5.0.1.5. Self-hosted мастер Amnezia ставит 3.1.
 - **Keenetic** — до 2.0, см. раздел 7.
 
@@ -563,7 +603,7 @@ sudo systemctl restart docker
 **Вариант 1 — PPA (официальный путь, есть пакеты для 24.04 и 26.04):**
 
 ```bash
-sudo apt install -y software-properties-common linux-headers-$(uname -r)
+sudo apt install -y software-properties-common linux-headers-generic
 sudo add-apt-repository -y ppa:amnezia/ppa
 sudo apt install -y amneziawg-dkms          # amneziawg-tools нужен, только если awg на хосте
 dkms status                                 # amneziawg/1.0.0, <ядро>: installed
@@ -572,14 +612,20 @@ dkms status                                 # amneziawg/1.0.0, <ядро>: insta
 `modinfo amneziawg | grep ^version` показывает версию протокола (`3.1.…`), не номер пакета.
 Пакет тянет `build-essential`, и тот может подтянуть обновление `libc6` — откатить установку
 простым `purge` всего нового потом не получится. DKMS собирает модуль под **каждое** ядро с
-заголовками, включая старые, ещё не удалённые (`apt autoremove --purge` их убирает).
+заголовками, включая предыдущее (Ubuntu оставляет его как запасное — это полезно).
+
+**Заголовки — метапакетом `linux-headers-generic`** (или парным к установленному
+`linux-image-*`: `-virtual`, `-kvm`…), а не `linux-headers-$(uname -r)`. Второй вариант ставит
+заголовки только текущего ядра и помечает их «вручную»: после обновления ядра заголовков нового
+не будет, DKMS не соберёт модуль, и после перезагрузки AmneziaWG пропадёт. Проверка:
+`dpkg -l linux-headers-generic`.
 
 **Вариант 2 — из исходников** (PPA недоступен или нужен коммит новее пакета). `dkms.conf`
 лежит в `src/`, поэтому клон репозитория целиком в `/usr/src/amneziawg-1.0.0` не работает
 (`Could not locate dkms.conf`) — исходники кладёт `make dkms-install`:
 
 ```bash
-sudo apt install -y dkms git build-essential linux-headers-$(uname -r)
+sudo apt install -y dkms git build-essential linux-headers-generic
 git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module /opt/amneziawg-src
 cd /opt/amneziawg-src/src && sudo make dkms-install
 sudo dkms add -m amneziawg -v 1.0.0
@@ -598,9 +644,8 @@ echo "amneziawg" | sudo tee /etc/modules-load.d/amneziawg.conf
 lsmod | grep amneziawg
 ```
 
-Если `linux-headers-$(uname -r)` не найден — ядро обновилось без перезагрузки:
-`sudo apt upgrade -y` и перезагрузись. DKMS пересобирает модуль при каждом новом ядре; после
-обновления ядра проверь `dkms status`, что для него модуль `installed`.
+`dkms status` должен показать модуль `installed` для `uname -r`. Если нет — ядро обновилось без
+перезагрузки или нет заголовков: `sudo apt upgrade -y`, перезагрузка, снова `dkms status`.
 
 ### Настройка wg-easy v15+
 
@@ -614,42 +659,89 @@ lsmod | grep amneziawg
 
 ### docker-compose.yml (пример, v15+)
 
+По официальному compose v15, с двумя отличиями: UI только на `127.0.0.1` и
+`OVERRIDE_AUTO_AWG=awg`.
+
 ```yaml
 services:
   wg-easy:
     image: ghcr.io/wg-easy/wg-easy:15
     container_name: wg-easy
+    env_file:
+      - /root/.config/wg-easy/init.env   # INIT_* — только на первый старт, потом убрать (ниже)
     environment:
-      - INIT_ENABLED=true
-      - INIT_USERNAME=admin
-      - INIT_PASSWORD=<ADMIN_PASSWORD>        # пароль веб-панели
-      - INIT_HOST=<SERVER_IP>                 # host в конфигах клиентов
-      - INIT_PORT=<WG_PORT>                   # UDP-порт WireGuard/AWG
-      - INIT_DNS=1.1.1.1,8.8.8.8
-      - EXPERIMENTAL_AWG=true                 # AmneziaWG; автодетект модуля, fallback на WG
-      # - OVERRIDE_AUTO_AWG=awg               # принудительно AWG (без fallback на WG)
+      - EXPERIMENTAL_AWG=true
+      - OVERRIDE_AUTO_AWG=awg            # без модуля не откатываться молча на обычный WireGuard
+    networks:
+      wg:
+        ipv4_address: 10.42.42.42
+        ipv6_address: fdcc:ad94:bacf:61a3::2a
     volumes:
-      - wg-easy-data:/etc/wireguard
+      - etc_wireguard:/etc/wireguard
+      - /lib/modules:/lib/modules:ro
     ports:
       - "<WG_PORT>:<WG_PORT>/udp"
-      - "127.0.0.1:<INTERNAL_UI_PORT>:51821/tcp"
+      - "127.0.0.1:51821:51821/tcp"      # панель — только через nginx
+    restart: unless-stopped
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
-    restart: unless-stopped
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv6.conf.all.forwarding=1
+      - net.ipv6.conf.default.forwarding=1
 
 volumes:
-  wg-easy-data:
+  etc_wireguard:
+
+networks:
+  wg:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.42.42.0/24
+        - subnet: fdcc:ad94:bacf:61a3::/64
 ```
 
-`INIT_*`-переменные действуют группой: задал `INIT_PASSWORD` — задай и `INIT_USERNAME`,
-`INIT_HOST`, `INIT_PORT`. После первого старта убери `INIT_PASSWORD` из compose
-(секрет в файле не нужен — дальше всё через UI).
+`/root/.config/wg-easy/init.env` (600): `INIT_ENABLED=true`, `INIT_USERNAME`, `INIT_PASSWORD`,
+`INIT_HOST=<SERVER_IP>`, `INIT_PORT=<WG_PORT>`, `INIT_DNS=1.1.1.1,8.8.8.8`. Переменные действуют
+группами: задал пароль — задай и имя, host, порт. После первого старта: убрать `env_file` из
+compose, удалить `init.env`, `docker compose up -d --force-recreate` и проверить
+`docker inspect wg-easy` — `INIT_PASSWORD` в окружении быть не должно (`INIT_ENABLED` — дефолт
+образа, это нормально). Пароль сохранить отдельно, в `admin.env` (600).
 
-**Важно:** UI привязан к `127.0.0.1` — доступ только через nginx reverse proxy.
+**Порт `<WG_PORT>` — выше `ip_local_port_range`** (`cat /proc/sys/net/ipv4/ip_local_port_range`,
+обычно до 60999): порт из диапазона может занять исходящий сокет в момент старта.
+
+**IPv6 оставить включённым, даже если у сервера нет глобального IPv6.** Тогда `::/0` у клиента
+уходит в туннель и гасится там; с `DISABLE_IPV6` клиент с родным IPv6 ходит мимо VPN.
+
+### Поднять обфускацию до 2.0 (по умолчанию wg-easy даёт 1.0)
+
+При первом старте wg-easy v15.4 генерирует только `Jc/Jmin/Jmax/S1/S2` и **статичные**
+`H1–H4` — это AmneziaWG 1.0, который ловится блокировками. `S3/S4`, диапазоны H и I1 задаются
+отдельно: в UI (Admin → Interface) или через API с Basic-авторизацией админа
+(`GET`/`POST /api/admin/interface`, затем `POST /api/admin/interface/restart`; `POST` требует
+весь объект интерфейса, поэтому сначала `GET`).
+
+- **S3/S4:** S4 добавляется к каждому пакету данных — не больше запаса MTU. При MTU 1420 и
+  транспорте IPv4 пакет занимает 1480 байт, запас 20: `S4 ≤ 20` (например S3 40, S4 12).
+  `S1 + 56 ≠ S2`.
+- **H1–H4 — непересекающиеся диапазоны** в `[5, 2^31−1]`, например по одному в каждой четверти.
+- **I1** — сигнатура CPS (см. `references/amneziawg-userspace.md`).
+
+**I1 с интерфейса к клиентам НЕ копируется** (в wg-easy I1–I5 у сервера и клиента свои). А пакеты
+I шлёт инициатор хендшейка — обычно клиент. Поэтому I1 задать ещё в двух местах: default для
+новых клиентов (`userconfig.defaultI1`, `/api/admin/userconfig`) и у уже созданных
+(`POST /api/client/<id>`). Проверка — `I1` есть в скачанном `.conf` клиента.
+
+Проверка результата: `docker exec wg-easy awg show wg0` — есть `s3`, `s4`, `h1: <a>-<b>`, `i1`.
+`scripts/diagnose.sh` показывает уровень обфускации (`1.0` / `1.5` / `2.0 + I1`).
+Клиенты со старыми конфигами после смены S/H не подключатся — перевыпустить конфиги.
 
 ### Новое в wg-easy v15.3: Firewall
 
@@ -657,7 +749,14 @@ volumes:
 
 ### nginx reverse proxy для wg-easy UI
 
-**Два варианта в зависимости от наличия домена:**
+**Два варианта в зависимости от наличия домена.** Общее для обоих:
+- `limit_req zone=panel` требует объявленной зоны, иначе `nginx -t` падает. Файл
+  `/etc/nginx/conf.d/wg-easy.conf` начинается с
+  `limit_req_zone $binary_remote_addr zone=panel:10m rate=10r/s;` (контекст `http`, conf.d в него входит).
+- Убрать default-сайт (`/etc/nginx/sites-enabled/default`), иначе nginx слушает 80. После
+  удаления `reload` старый сокет 80 может не отпустить — `systemctl restart nginx`.
+- Внешний порт панели открыть в UFW **только** доверенным IP (nginx — на хосте, UFW тут работает):
+  `sudo ufw allow from <IP> to any port <EXTERNAL_UI_PORT> proto tcp`.
 
 #### Вариант А: с доменом (DOMAIN задан)
 
@@ -675,12 +774,14 @@ server {
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
 
-    limit_req zone=panel burst=20;
+    limit_req zone=panel burst=20 nodelay;
 
     location / {
-        proxy_pass http://127.0.0.1:<INTERNAL_UI_PORT>;
+        proxy_pass http://127.0.0.1:51821;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -709,12 +810,14 @@ server {
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
 
-    limit_req zone=panel burst=20;
+    limit_req zone=panel burst=20 nodelay;
 
     location / {
-        proxy_pass http://127.0.0.1:<INTERNAL_UI_PORT>;
+        proxy_pass http://127.0.0.1:51821;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -857,6 +960,11 @@ host-route для IP сервера в обход туннеля. Трафик �
 
 ## 8. Диагностика и отладка
 
+**VPN настроен — докажи, что работает.** После настройки и после каждой перезагрузки —
+сквозная проверка клиентом из Docker на рабочей машине: внешний IP через туннель, хендшейк,
+сигнатура I1 на проводе, сертификат target'а для Reality, панели закрыты для чужих —
+`references/vpn-testing.md`. Статусы (`healthy`, `jc:` в `awg show`) этого не доказывают.
+
 ### Контейнер не стартует
 
 ```bash
@@ -945,3 +1053,8 @@ hardening-гайда ssh-audit, триаж CVE по «исполняется л�
     перевзводит его заново, и откат молча уезжает. Только `--on-calendar` с абсолютным временем.
 16. **Не бери tools и модуль AmneziaWG разных поколений** — `awg`/wg-easy с tools 1.0.x против
     модуля 3.x дают `attribute type 14 has an invalid length`. Со свежим модулем — wg-easy ≥ v15.4.0.
+17. **Не считай «AWG включён» = «обфускация достаточная»** — wg-easy при первом старте генерирует
+    1.0 (без I1, S3/S4, диапазонов H), а I1 с интерфейса к клиентам не копируется. Уровень —
+    `scripts/diagnose.sh`, I1 — в `.conf` клиента.
+18. **Не пиши REJECT по `--ctorigdstport` без `--ctdir ORIGINAL`** — правило ловит и ответы
+    контейнера, панель не открывается даже с разрешённого IP.

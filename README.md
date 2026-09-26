@@ -26,10 +26,12 @@ VPN для обхода DPI (AmneziaWG, xray), Docker за файрволом, �
 | Апгрейд LTS → LTS | `references/release-upgrade.md` | Обход «нет доступного апгрейда» без `-d`, tmux, резервный sshd, что проверить после |
 | Автообновление образов | `references/image-updates.md` | Скрипт с различающим гейтом и откатом, четыре ловушки, стенд для проверки отката |
 | Аудит | `references/audit.md` | Lynis, ssh-audit, Trivy: ложные срабатывания, вредные части hardening-гайдов, триаж CVE |
+| Сквозная проверка VPN | `references/vpn-testing.md` | Клиенты AmneziaWG и xray в Docker на рабочей машине: внешний IP, сигнатура I1 на проводе, маскировка Reality, панели закрыты для чужих |
 | Грабли | `SKILL.md`, раздел 10 | Что ломает сервер молча |
 
-Проверено вживую на Ubuntu 26.04.1: kernel-модуль AmneziaWG 3.1 из PPA ставится и грузится
-на ядре 7.0; конфиги xray из справочника проходят `xray run -test` на актуальном xray-core.
+Проверено вживую на Ubuntu 26.04.1 (1 vCPU, 1 ГБ RAM): AmneziaWG 2.0 + I1 через wg-easy v15.4 и
+kernel-модуль 3.1, xray через 3x-ui v3.8.5 (VLESS RAW и XHTTP Reality). Сквозные тесты
+клиентами, проверка доступа к панелям снаружи, повтор после перезагрузки.
 
 ## Быстрый старт: проверить сервер
 
@@ -88,7 +90,8 @@ ubuntu-server-admin/
 │   ├── xray.md                   # транспорты xray, 3x-ui, клиенты
 │   ├── release-upgrade.md        # апгрейд LTS → LTS
 │   ├── image-updates.md          # автообновление Docker-образов с откатом
-│   └── audit.md                  # Lynis, ssh-audit, Trivy
+│   ├── audit.md                  # Lynis, ssh-audit, Trivy
+│   └── vpn-testing.md            # сквозная проверка VPN клиентами в Docker
 ├── scripts/
 │   └── diagnose.sh               # read-only диагностика уровня 3 с вердиктами
 ├── scenario/

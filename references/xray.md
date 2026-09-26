@@ -69,29 +69,56 @@ VLESS Encryption и поле `target` для Reality.
 
 ### Установка
 
+Порядок: сначала ограничение порта панели в DOCKER-USER (SKILL.md, раздел 2), потом контейнер.
+
 ```yaml
 services:
   3x-ui:
     image: ghcr.io/mhsanaei/3x-ui:<VERSION>  # актуальный тег с github releases; при мажорном переходе — читай changelog
     container_name: 3x-ui
+    environment:
+      XRAY_VMESS_AEAD_FORCED: "false"
+      XUI_ENABLE_FAIL2BAN: "true"
+      XUI_PORT: "<PANEL_PORT>"                 # порт панели; без него — 2053
+      XUI_INIT_WEB_BASE_PATH: "/<RANDOM_HEX>/" # случайный путь, только на первый старт
+    mem_limit: 384m          # маленький VPS: панель сама держит Go-кучу ~90% от лимита
     volumes:
       - ./db:/etc/x-ui
-      - ./certs:/root/certs:ro
-    cap_add:                # как в upstream docker-compose.yml
+      - ./cert:/root/cert
+    cap_add:                # как в upstream: встроенный fail2ban (IP limit) пишет в iptables
       - NET_ADMIN
       - NET_RAW
+    tty: true
     ports:
-      - "<PANEL_PORT>:<PANEL_PORT>"
-      - "443:443"           # RAW Reality
-      - "8443:8443"         # XHTTP/WS + TLS
-      - "2083:2083"         # XHTTP Reality
+      - "<PANEL_PORT>:<PANEL_PORT>"  # доступ — только через DOCKER-USER
+      - "443:443"                    # RAW Reality
+      - "2083:2083"                  # XHTTP Reality
+      # - "8443:8443"                # XHTTP/WS + TLS, если есть домен
     restart: unless-stopped
-    network_mode: bridge
 ```
 
-**Docker-образ стартует с дефолтами `admin`/`admin`, порт 2053, путь `/`** (случайные значения
-генерирует только `install.sh`, не образ). До того как открыть порт наружу: сменить логин,
-пароль, порт и base path — первым делом, с доверенного IP.
+**Логин и пароль по умолчанию — `admin`/`admin`** (случайные генерирует только `install.sh`,
+не образ). Сменить до открытия порта, из контейнера:
+```bash
+docker exec 3x-ui /app/x-ui setting -username '<USER>' -password '<PASS>' && docker restart 3x-ui
+docker exec 3x-ui /app/x-ui setting -show | grep hasDefaultCredential   # false
+```
+Секреты генерировать на сервере (`openssl rand`) и хранить в `/root/.config/3x-ui/admin.env` (600).
+
+- `x-ui setting -show` покажет `port: 2053`, даже когда панель работает на `XUI_PORT` —
+  переменная перекрывает значение в БД. Уберёшь `XUI_PORT` из compose — панель тихо уедет на 2053.
+- 3x-ui собирает образ с **pre-release** xray (v3.8.5 — xray 26.9.9 при стабильном 26.3.27).
+
+### API для автоматизации
+
+Bearer-токен: `docker exec 3x-ui /app/x-ui setting -getApiToken` (перевыпускает токен).
+Адрес — `http://127.0.0.1:<PANEL_PORT>/<BASE_PATH>/panel/api/…`, схема — `…/panel/api/openapi.json`.
+- ключи Reality: `GET /server/getNewX25519Cert` → `privateKey`, `publicKey`;
+- inbound: `POST /inbounds/add`, JSON с полями `remark`, `port`, `protocol`, `tag`, `enable` и
+  **строками** JSON в `settings`, `streamSettings`, `sniffing`;
+- в объекте клиента `tgId` — число (`0`), не строка: со строкой `add` падает с
+  `cannot unmarshal string … tgId`;
+- после изменений: `POST /server/restartXrayService`; итог — `GET /server/getConfigJson`.
 
 ### Критично: порты в docker-compose
 
@@ -104,10 +131,10 @@ services:
 
 ### Безопасность панели
 
-- Сменить стандартный порт (не 2053!)
-- Добавить базовый путь (например `/42dd4c47bad9/`)
-- HTTPS: указать webCertFile/webKeyFile в настройках панели
-- UFW: ограничить порт панели доверенными IP + VPN-подсетью
+- Порт не 2053 (`XUI_PORT`), случайный base path, свой логин и пароль (выше)
+- Доступ к порту — только доверенные IP через DOCKER-USER (SKILL.md, раздел 2). UFW тут не
+  работает: панель в Docker
+- HTTPS: `webCertFile`/`webKeyFile` в настройках панели, если панель ходит не через туннель
 
 ---
 
@@ -137,7 +164,20 @@ services:
 
 Требования: иностранный сайт, TLS 1.3 + HTTP/2, без редиректа на главной. Лучше всего —
 сайт **в той же ASN (дата-центре), что и сервер**: трафик «к соседу» выглядит естественно.
-Подобрать такой: [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) по подсети сервера.
+Подобрать такой: [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) по подсети сервера
+(`-addr <SERVER_IP>/24 -thread 8`; сборки только под Linux и Windows — на маке через Docker).
+
+**В выдаче сканера по подсети VPS половина — чужие Reality-серверы**, выдающие себя за
+github.com, cloudflare.com, discord.com и т.п. Такой «сосед» бесполезен: сайт на самом деле не
+здесь. Оставлять только тех, у кого A-запись домена указывает на тот самый IP из скана:
+```bash
+tail -n +2 out.csv | while IFS=, read -r ip _ _ _ _ _ _ _ dom _; do
+  case "$dom" in \*.*) continue;; esac
+  dig +short A "$dom" @1.1.1.1 | grep -qx "$ip" && echo "$ip $dom — свой"
+done
+```
+У выбранного проверить с сервера HTTP/2 и код без редиректа (ниже). Цена выбора маленького
+соседа: если его сайт пропадёт, Reality перестанет работать — держать в паспорте запасной target.
 
 **Не брать:**
 - `microsoft`, `apple`, `icloud`, домены `.ru`/`.ir`/`.cn` — с v26.3.27 xray пишет
@@ -145,8 +185,10 @@ services:
 - сайты за Cloudflare (в т.ч. `www.cloudflare.com`) — сервер становится открытым
   форвардером к CF.
 
-Приемлемый запасной вариант без сканирования — `dl.google.com`. Проверка с сервера:
-`curl -sI --http2 https://<TARGET> | head -1` → `HTTP/2 200` (не 301/302).
+Проверка кандидата с сервера:
+`curl -s -o /dev/null --http2 --tlsv1.3 -w '%{http_version} %{http_code}\n' https://<TARGET>/` →
+`2 200`. Код 301/302 — не подходит: так, например, отвечает `dl.google.com` (главная — редирект).
+Запасной вариант без сканирования — `www.google.com` (`2 200`, xray его не помечает).
 
 ### Ручной конфиг (config.json)
 

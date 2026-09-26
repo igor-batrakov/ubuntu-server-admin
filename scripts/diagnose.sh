@@ -11,6 +11,14 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 TODO=()
+# Уровень обфускации AmneziaWG по выводу awg show: 1.0 (только jc/s1/s2/статичные h) ловится DPI
+awg_level() {
+  local o="$1" lvl="1.0"
+  echo "$o" | grep -qE '^[[:space:]]*i1:' && lvl="1.5"
+  echo "$o" | grep -qE '^[[:space:]]*s3:' && echo "$o" | grep -qE '^[[:space:]]*h1: [0-9]+-[0-9]+' && lvl="2.0"
+  [ "$lvl" = 2.0 ] && echo "$o" | grep -qE '^[[:space:]]*i1:' && lvl="2.0 + I1"
+  echo "$lvl"
+}
 ok()   { printf '  [OK] %s\n' "$1"; }
 bad()  { printf '  [!!] %s  -> %s\n' "$1" "$2"; TODO+=("$2|$1"); }
 info() { printf '  [..] %s\n' "$1"; }
@@ -87,7 +95,11 @@ h "Таймеры отката и временный sudo"
 TIMERS=$(systemctl list-timers --no-legend --no-pager 2>/dev/null | grep -E 'ssh-rollback|ufw-rollback|sudo-temp-expire')
 if [ -n "$TIMERS" ]; then
   while IFS= read -r t; do
-    bad "взведён таймер: $(echo "$t" | awk '{for(i=1;i<=NF;i++) if($i ~ /\.timer$/) print $i}') — если проверка закончена, останови его, иначе он откатит изменения" "раздел 1, dead-man switch"
+    tn=$(echo "$t" | awk '{for(i=1;i<=NF;i++) if($i ~ /\.timer$/) print $i}')
+    case "$tn" in
+      sudo-temp-expire.timer) info "временный NOPASSWD активен до $(echo "$t" | awk '{print $2, $3}') — снять в конце работ" ;;
+      *) bad "взведён таймер отката $tn — если проверка закончена, останови его, иначе он откатит изменения" "раздел 1, dead-man switch" ;;
+    esac
   done <<< "$TIMERS"
 else
   ok "висящих таймеров отката нет"
@@ -118,7 +130,18 @@ if have docker && docker info >/dev/null 2>&1; then
   RESTARTING=$(docker ps --filter status=restarting --format '{{.Names}}' | paste -sd ' ')
   [ -n "$RESTARTING" ] && bad "контейнеры в Restarting-цикле: $RESTARTING (заброшенный образ после обновления Docker? см. watchtower)" "раздел 6"
   # Опубликованные на все адреса порты: Docker обходит UFW, поэтому «не разрешён в UFW» ≠ «закрыт»
+  # DOCKER-USER плюс собственные цепочки, в которые он переходит (например PANEL-ACL)
   DU=$(iptables -S DOCKER-USER 2>/dev/null)
+  for ch in $(echo "$DU" | awk '/ -j /{print $NF}' | grep -vxE 'ACCEPT|RETURN|DROP|REJECT|LOG' | sort -u); do
+    DU="$DU
+$(iptables -S "$ch" 2>/dev/null)"
+  done
+  # Ловушка: REJECT/DROP по --ctorigdstport без --ctdir ORIGINAL совпадает и с ответами контейнера
+  # (источник 172.x), и панель не открывается даже с разрешённого адреса
+  if echo "$DU" | grep -E -- '--ctorigdstport' | grep -E -- '-j (REJECT|DROP)' | grep -qv -- '--ctdir ORIGINAL' \
+     && ! echo "$DU" | grep -qE -- '-s 172\.(1[6-9]|2[0-9]|3[01])\.[0-9.]+/[0-9]+ .*-j (ACCEPT|RETURN)'; then
+    bad "в DOCKER-USER есть REJECT/DROP по --ctorigdstport без --ctdir ORIGINAL — ответы контейнеров тоже режутся" "раздел 2, DOCKER-USER"
+  fi
   PUB=$(docker ps --format '{{.Names}}|{{.Ports}}' | while IFS='|' read -r n ports; do
           echo "$ports" | tr ',' '\n' | grep -oE '(0\.0\.0\.0|\[::\]|::):[0-9]+(-[0-9]+)?->[0-9]+/(tcp|udp)' \
             | sed -E 's/^(0\.0\.0\.0|\[::\]|::)://' | awk -v n="$n" -F'->' '{split($2,a,"/"); print n"|"$1"|"a[2]}'
@@ -175,9 +198,9 @@ if have awg; then
     PORT=$(echo "$D" | awk '/listening port:/{print $3}')
     PEERS=$(echo "$D" | grep -c '^peer:')
     if echo "$D" | grep -qE '^[[:space:]]*jc:'; then
-      LVL="обфускация есть"
-      echo "$D" | grep -qE '^[[:space:]]*i1:' && LVL="$LVL, I1 (1.5+)"
-      ok "$i: порт $PORT, пиров $PEERS, $LVL"
+      LVL=$(awg_level "$D")
+      ok "$i: порт $PORT, пиров $PEERS, уровень обфускации $LVL"
+      [ "$LVL" = "1.0" ] && bad "$i: обфускация AWG 1.0 — ловится DPI, поднять до 1.5+ (I1)" "раздел 4"
     else
       bad "$i: нет jc/jmin — это обычный WireGuard без обфускации" "раздел 4"
     fi
@@ -205,7 +228,9 @@ if [ -n "$WGE" ]; then
   WSHOW=$(docker exec "$N" awg show 2>/dev/null || docker exec "$N" wg show 2>/dev/null)
   if echo "$ENV" | grep -q '^EXPERIMENTAL_AWG=true'; then
     if echo "$WSHOW" | grep -qE '^[[:space:]]*jc:'; then
-      ok "AmneziaWG активен (jc/jmin в awg show)"
+      LVL=$(awg_level "$WSHOW")
+      ok "AmneziaWG активен, уровень обфускации: $LVL"
+      [ "$LVL" = "1.0" ] && bad "обфускация AWG 1.0 (дефолт wg-easy: без I1, S3/S4, диапазонов H) — ловится DPI; поднять до 2.0 и задать I1 клиентам" "раздел 4"
     elif [ -n "$WSHOW" ]; then
       bad "EXPERIMENTAL_AWG=true, но в awg show нет jc — wg-easy откатился на обычный WireGuard (нет kernel-модуля?)" "раздел 4"
     else
