@@ -82,7 +82,7 @@ info "sshd_config.d: ${DROPINS:-пусто}"
 for f in /etc/ssh/sshd_config.d/*; do
   [ -e "$f" ] || continue
   case "$f" in
-    *.bak*.conf|*.orig*.conf|*.old*.conf|*.bak.conf)
+    *.bak*.conf|*.orig*.conf|*.old*.conf)
       bad "$(basename "$f") в sshd_config.d — это бэкап, но оканчивается на .conf и читается как конфиг" "раздел «Базовые принципы»" ;;
     *.conf) ;;
     *) info "$(basename "$f") в sshd_config.d — sshd его не читает (не *.conf), но бэкапам место в /root/config-bak" ;;
