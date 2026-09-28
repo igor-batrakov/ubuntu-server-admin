@@ -129,7 +129,7 @@ sudo docker ps --format "table {{.Names}}\t{{.Ports}}\t{{.Status}}"
 
 # WireGuard / wg-easy
 sudo docker ps | grep wg-easy
-sudo wg show 2>/dev/null || echo "Нет WG интерфейсов"
+sudo docker exec wg-easy awg show 2>/dev/null | head -20   # wg0 живёт в сети контейнера, на хосте его не видно
 
 # xray / 3x-ui
 sudo docker ps | grep -E 'xray|3x-ui'
@@ -671,8 +671,10 @@ lsmod | grep amneziawg
 
 ### docker-compose.yml (пример, v15+)
 
-По официальному compose v15, с двумя отличиями: UI только на `127.0.0.1` и
-`OVERRIDE_AUTO_AWG=awg`.
+По официальному compose v15, с тремя отличиями: UI только на `127.0.0.1`,
+`OVERRIDE_AUTO_AWG=awg` и свой `healthcheck`. Встроенный в образ зовёт `wg show`, а интерфейс
+в режиме AWG имеет тип `amneziawg`, и `wg show` его не видит: контейнер навсегда `unhealthy`,
+и алерт о нездоровых контейнерах (new-vps-setup, раздел 5) шумит каждый час.
 
 ```yaml
 services:
@@ -694,6 +696,11 @@ services:
     ports:
       - "<WG_PORT>:<WG_PORT>/udp"
       - "127.0.0.1:51821:51821/tcp"      # панель — только через nginx
+    healthcheck:                         # образ проверяет `wg show`, интерфейс amneziawg видит только awg
+      test: ["CMD-SHELL", "timeout 5s awg show | grep -q interface || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
@@ -1007,7 +1014,7 @@ sudo docker ps --format "table {{.Names}}\t{{.Ports}}"
 ```bash
 sysctl net.ipv4.ip_forward              # = 1?
 sudo iptables -t nat -L POSTROUTING -v -n
-sudo docker exec wg-easy wg show        # peers
+sudo docker exec wg-easy awg show       # peers (в режиме AWG `wg show` пуст — интерфейс amneziawg)
 sudo ufw status
 ```
 

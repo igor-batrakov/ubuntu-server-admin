@@ -1,5 +1,14 @@
 # Изменения
 
+## 2026-09-28 — wg-easy в режиме AWG вечно unhealthy
+
+- Встроенный healthcheck образа wg-easy:15 зовёт `wg show`, а интерфейс с
+  `OVERRIDE_AUTO_AWG=awg` имеет тип `amneziawg` и виден только `awg show`. Контейнер
+  всегда `unhealthy`. В compose-пример добавлен свой `healthcheck` на `awg show`
+  (проверено на стенде vdsina-ned-2: `healthy`), в диагностике `wg show` заменён на `awg show`.
+- Раздел 0: `sudo wg show` на хосте ничего не показывал — `wg0` у wg-easy живёт в сети
+  контейнера. Заменён на `docker exec wg-easy awg show`.
+
 ## 2026-09-26 — живой прогон VPN на Ubuntu 26.04 (1 vCPU, 1 ГБ)
 
 Поднят AmneziaWG + xray на чистом после new-vps-setup сервере строго по скиллу; всё, что
