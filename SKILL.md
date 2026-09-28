@@ -632,6 +632,15 @@ dkms status                                 # amneziawg/1.0.0, <ядро>: insta
 не будет, DKMS не соберёт модуль, и после перезагрузки AmneziaWG пропадёт. Проверка:
 `dpkg -l linux-headers-generic`.
 
+**При уборке диска не удалять** `dkms`, `build-essential`/`gcc`/`make` и метапакет
+заголовков. Без них ночное обновление ядра пройдёт, модуль под новое ядро не соберётся, и
+после автоперезагрузки AmneziaWG пропадёт. Записать это в паспорт сервера одной строкой.
+Переход `linux-generic` → `linux-virtual`, чтобы снять `linux-firmware` (~750 МБ): на 26.04
+`linux-headers-virtual` зависит от `linux-headers-generic`, поэтому удаление `-generic`
+заголовков вместе с прошивкой сносит весь `linux-virtual`. Ставить `linux-virtual`,
+удалять только `linux-generic` и `linux-image-generic`, `linux-headers-generic` не трогать.
+Перед удалением прогнать `apt-get -s remove …` и прочитать список.
+
 **Вариант 2 — из исходников** (PPA недоступен или нужен коммит новее пакета). `dkms.conf`
 лежит в `src/`, поэтому клон репозитория целиком в `/usr/src/amneziawg-1.0.0` не работает
 (`Could not locate dkms.conf`) — исходники кладёт `make dkms-install`:
@@ -674,7 +683,12 @@ lsmod | grep amneziawg
 По официальному compose v15, с тремя отличиями: UI только на `127.0.0.1`,
 `OVERRIDE_AUTO_AWG=awg` и свой `healthcheck`. Встроенный в образ зовёт `wg show`, а интерфейс
 в режиме AWG имеет тип `amneziawg`, и `wg show` его не видит: контейнер навсегда `unhealthy`,
-и алерт о нездоровых контейнерах (new-vps-setup, раздел 5) шумит каждый час.
+и алерт о нездоровых контейнерах (new-vps-setup, раздел 5) шумит каждый час. Свой проверяет
+строки `jc:`/`jmin:`, а не `interface`: `interface` есть и у обычного WireGuard, и тогда
+пропажа обфускации оставила бы контейнер `healthy` (тот же признак, что у `gate()` в
+`references/image-updates.md`). Сам healthcheck никому не пишет. `unhealthy` превращается в
+сообщение только через проверку `docker ps --filter health=unhealthy` в `healthcheck.sh` из
+new-vps-setup (раздел 5). Без неё статус никто не прочитает.
 
 ```yaml
 services:
@@ -697,7 +711,7 @@ services:
       - "<WG_PORT>:<WG_PORT>/udp"
       - "127.0.0.1:51821:51821/tcp"      # панель — только через nginx
     healthcheck:                         # образ проверяет `wg show`, интерфейс amneziawg видит только awg
-      test: ["CMD-SHELL", "timeout 5s awg show | grep -q interface || exit 1"]
+      test: ["CMD-SHELL", "timeout 5s awg show | grep -qE '(^|[[:space:]])(jc|jmin):' || exit 1"]
       interval: 60s
       timeout: 5s
       retries: 3
@@ -925,6 +939,50 @@ find "$BACKUP_DIR" -name "*.tar.gz" -mtime +7 -delete
 # /etc/cron.d/<service>-backup
 30 2 * * * root /usr/local/bin/<service>-backup.sh >/dev/null 2>&1
 ```
+
+Такой архив лежит на том же диске и от его гибели не спасает. Offsite-бэкап — restic из
+new-vps-setup (раздел 6, `references/backups.md`).
+
+### Данные VPN — в ежедневный бэкап (последний шаг установки VPN)
+
+`backup-now` из new-vps-setup про VPN ничего не знает, а `./db` скилл бэкапит только перед
+обновлением образа. Если диск погибнет, всех клиентов и ключи придётся создавать заново.
+После установки дописать в `PATHS` скрипта `/usr/local/bin/backup-now`:
+
+| Путь | Что там |
+|---|---|
+| `/opt/3x-ui` | compose, `db/x-ui.db` (inbound'ы, клиенты), сертификаты |
+| `/opt/wg-easy` | compose |
+| `/var/lib/docker/volumes/wg-easy_etc_wireguard/_data` | `wg-easy.db` (клиенты, ключи, параметры AWG), `wg0.conf` |
+| `/root/.acme.sh` | сертификаты и аккаунт, если выпускает acme.sh |
+| `/var/backups/db-dumps` | дампы SQLite (ниже) |
+
+Имя тома — `<каталог compose>_etc_wireguard`, сверить: `docker inspect wg-easy --format
+'{{range .Mounts}}{{.Source}} {{end}}'`.
+
+**SQLite — дампом, а не живым файлом.** `x-ui.db` работает в режиме WAL: на стенде
+основной файл весил 4 КБ, а данные лежали в `x-ui.db-wal` (1,6 МБ). Копия одного файла
+пустая, копия пары, снятая на ходу, может оказаться несогласованной. В `backup-now` перед
+`restic backup` (нужен пакет `sqlite3`):
+
+```bash
+DUMPS=/var/backups/db-dumps          # в дампах ключи клиентов — только root
+mkdir -p "$DUMPS" && chmod 700 "$DUMPS"
+sqlite3 /opt/3x-ui/db/x-ui.db ".backup $DUMPS/x-ui.db"
+sqlite3 /var/lib/docker/volumes/wg-easy_etc_wireguard/_data/wg-easy.db ".backup $DUMPS/wg-easy.db"
+```
+
+Живые файлы исключить из `restic backup` (проверено `--dry-run` на restic 0.18):
+`--exclude '/opt/3x-ui/db/x-ui.db*' --exclude '/var/lib/docker/volumes/wg-easy_etc_wireguard/_data/wg-easy.db*'`.
+Без `sqlite3` — `docker compose stop` вокруг бэкапа (VPN ляжет на время копирования).
+Восстановление: остановить контейнер, положить дамп на место живого файла, удалить его
+`-wal`/`-shm`, поднять контейнер.
+
+Проверка — учебное восстановление: `restic restore latest --include /var/backups/db-dumps
+--target /var/tmp/restore`, затем `sqlite3 /var/tmp/restore/var/backups/db-dumps/x-ui.db
+'select remark from inbounds'` и то же для `wg-easy.db` (`select name from clients_table`)
+должны показать живые записи. В паспорт — строку «данные VPN в restic, дампы SQLite в
+`/var/backups/db-dumps`». `scripts/diagnose.sh` сверяет тома VPN-контейнеров с `PATHS`.
 
 ### Автообновление Docker-образов (с rollback)
 

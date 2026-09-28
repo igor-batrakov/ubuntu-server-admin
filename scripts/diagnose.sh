@@ -276,6 +276,37 @@ while IFS='|' read -r n img; do
 done < <(docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | grep -iE '3x-ui|xray')
 [ "$FOUND" = 0 ] && info "xray / 3x-ui не запущены"
 
+# ---------------------------------------------------------------- данные VPN в бэкапе
+h "Данные VPN в бэкапе"
+BN=/usr/local/bin/backup-now
+VPNCT=$(docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | grep -iE 'wg-easy|3x-ui|xray' | cut -d'|' -f1)
+if [ -z "$VPNCT" ]; then
+  info "VPN-контейнеров нет"
+elif [ ! -f "$BN" ]; then
+  info "нет $BN (restic из new-vps-setup) — данные VPN бэкапятся только перед обновлением образа"
+else
+  # PATHS=( ... ) из backup-now: первое слово строки без комментария; "$VAR" не раскрываем
+  BPATHS=$(sed -n '/^PATHS=(/,/^)/p' "$BN" | sed -e 's/#.*//' -e 's/^PATHS=(//' | awk '$1 ~ /^\//{print $1}')
+  for n in $VPNCT; do
+    # только тома на запись: /lib/modules:ro у wg-easy — не данные
+    while read -r src; do
+      [ -n "$src" ] || continue
+      COVER=""
+      for p in $BPATHS; do
+        p=${p%/}
+        case "$src" in "$p"|"$p"/*) COVER=$p; break ;; esac
+      done
+      if [ -z "$COVER" ]; then
+        bad "$n: $src не в PATHS $BN — при гибели диска клиенты и ключи потеряются" "раздел 6, Данные VPN"
+      elif find "$src" -maxdepth 2 -name '*.db' 2>/dev/null | grep -q . && ! grep -q '\.backup' "$BN"; then
+        bad "$n: SQLite в $src бэкапится живым файлом, без sqlite3 .backup (WAL — копия бывает пустой)" "раздел 6, Данные VPN"
+      else
+        ok "$n: $src в бэкапе (через $COVER)"
+      fi
+    done < <(docker inspect "$n" --format '{{range .Mounts}}{{if .RW}}{{println .Source}}{{end}}{{end}}' 2>/dev/null)
+  done
+fi
+
 # ---------------------------------------------------------------- базовое (кратко)
 h "База (подробно — diagnose.sh из new-vps-setup)"
 UU_PKG=$(dpkg-query -W -f='${Status}' unattended-upgrades 2>/dev/null)
