@@ -42,9 +42,10 @@ docker run --rm --cap-add NET_ADMIN --device /dev/net/tun \
 
 ### Клиент для AmneziaWG 3.x
 
-В образе wg-easy v15.4 — `amneziawg-go`/`amneziawg-tools` **3.0**: ключей 3.1 (`RandomTrailers`,
-`DisableCookies`) они не знают. Для проверки inbound'а 3.1 (например, встроенного в 3x-ui)
-собрать свой клиентский образ из тех же тегов, что в Dockerfile wg-easy master:
+В образе wg-easy **v15.5.0** уже `amneziawg-go`/`amneziawg-tools` **3.1** — для проверки
+inbound'а 3.1 (например, встроенного в 3x-ui) хватит рецепта выше с тегом `15.5.0`. В v15.4 —
+3.0: ключей 3.1 (`RandomTrailers`, `DisableCookies`) они не знают. Если нужен клиент без образа
+wg-easy — собрать свой из тех же тегов, что в Dockerfile wg-easy:
 
 ```dockerfile
 FROM alpine:3 AS build
@@ -107,6 +108,17 @@ docker run -d --name xt -p 127.0.0.1:18081:10808 -v "$PWD/raw.json:/etc/xray/c.j
 curl -s -m 15 --socks5-hostname 127.0.0.1:18081 https://ifconfig.me/ip    # = IP сервера
 docker rm -f xt
 ```
+
+- Конфиг с ключами обычно лежит с правами 600, а процесс в образе xray-core не root: конфиг он
+  не прочитает и **сразу выйдет** (на сервере с алертами на `die` — `exit=23`). С `--rm` пропадёт
+  и лог. Запускать с `--user 0` или без `--rm`, чтобы прочитать `docker logs`.
+- Проба с самого сервера тоже годится: `--network host` вместо `-p …` (проброс с ним
+  игнорируется, поэтому `curl` — на `127.0.0.1:10808`), адрес в `vnext` — свой публичный IP.
+  IP через туннель тогда совпадёт с IP сервера и без туннеля, поэтому различающий гейт другой —
+  рост счётчика клиента в xray на объём скачанного через пробу. В образе 3x-ui `xray` не в PATH:
+  ```bash
+  docker exec 3x-ui sh -c '/app/bin/xray-linux-* api statsquery --server=127.0.0.1:62789 -pattern "user>>>"'
+  ```
 
 Маскировка — обычный TLS без ключа Reality должен получить сертификат target'а:
 ```bash
