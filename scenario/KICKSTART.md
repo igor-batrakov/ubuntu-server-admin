@@ -26,7 +26,8 @@
 ### Шаг 2 — SSH hardening + fail2ban
 
 - Параметры hardening в том же `/etc/ssh/sshd_config.d/00-hardening.conf`
-- fail2ban: jails sshd (`backend = systemd`) + recidive, ignoreip из TRUSTED_IP в SETUP_INFO.md
+- fail2ban по разделу 1 skill'а: один `jail.d/local.local`, nftables, sshd (`backend = systemd`) с нарастанием,
+  recidive на файле (`backend = auto`, окно 7d, 30d → 60d → 90d), `db.local` 90d; ignoreip из TRUSTED_IP в SETUP_INFO.md
 - Проверь автообновления безопасности (три условия из раздела 0 skill'а)
 
 ### Шаг 3 — Система

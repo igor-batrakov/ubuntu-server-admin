@@ -1,5 +1,24 @@
 # Изменения
 
+## 2026-11-09 — fail2ban: nftables, recidive, который реально банит
+
+Схема выкачена и проверена на 7 серверах флота: эффективные значения через `fail2ban-client get`,
+живой тест на `192.0.2.77`.
+
+- Раздел 1, «fail2ban»: один `jail.d/local.local` вместо `local.conf`. Файл, прочитанный позже,
+  заменяет `ignoreip` целиком, поэтому `ignoreip` задаётся только в `[DEFAULT]`.
+- `banaction = nftables`, у каждого джейла своё множество. С `ufw` бан sshd и бан recidive были
+  одним правилом, и снятие 6-часового бана снимало 30-дневный.
+- recidive: явные `backend = auto` и `logpath = /var/log/fail2ban.log`. Без них джейл наследует
+  `systemd` из `defaults-debian.conf` и не видит ни строки. Окно 7d вместо 1d: при нарастающем
+  бане sshd третий бан за сутки не наступает, и на 5 серверах recidive не забанил ни разу. Бан
+  30d → 60d → 90d (`bantime.factor = 1`, `bantime.multipliers = 1 2 3`, `maxtime = 90d`).
+- `fail2ban.d/db.local`: `dbpurgeage = 90d`. При умолчании 1d ступени нарастания сбрасывались
+  через сутки.
+- Проверки: `fail2ban-client -t`, `get recidive logpath`, раздельность множеств тестовым адресом,
+  через неделю `Total banned` у recidive больше нуля. Бессрочный бан и UDP в recidive не ставить.
+- `scenario/KICKSTART.md`, шаг 2: ссылка на новую схему.
+
 ## 2026-10-29 — wg-easy v15.5.0: откат только с БД, API и пароль админа
 
 Обновление живого сервера 15.4.0 → 15.5.0 (Ubuntu 24.04, kernel-модуль из git за март 2026,

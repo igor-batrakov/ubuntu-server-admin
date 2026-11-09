@@ -360,11 +360,21 @@ sed -i '/<old-key-comment>/d' ~/.ssh/authorized_keys
 sudo apt install fail2ban -y
 ```
 
-`/etc/fail2ban/jail.d/local.conf` (выложить файлом, не `echo | tee`):
+Один файл `/etc/fail2ban/jail.d/local.local` (выложить файлом, не `echo | tee`). Других `*.local`
+в `jail.d` не заводить: файл, прочитанный позже, заменяет `ignoreip` целиком, а не дополняет.
 ```ini
 [DEFAULT]
-# свои постоянные адреса (дом, офис, VPN-выход) — спросить у пользователя
+# свои постоянные адреса (дом, офис, VPN-выход) — спросить у пользователя.
+# Только здесь: значение в секции джейла сильнее [DEFAULT], и recidive его бы не увидел.
 ignoreip = 127.0.0.1/8 ::1 <TRUSTED_IP>
+# nftables, у каждого джейла своё множество. С banaction = ufw бан sshd и бан recidive —
+# одно и то же правило «reject from IP», и снятие 6-часового бана sshd снимает 30-дневный.
+banaction = nftables[type=multiport]
+banaction_allports = nftables[type=allports]
+bantime  = 6h
+findtime = 30m
+maxretry = 4
+# Нарастание со второго бана: 6h → 24h → 48h → 96h → 7d (bantime × 2^n × factor, потолок maxtime)
 bantime.increment = true
 bantime.factor = 2
 bantime.maxtime = 7d
@@ -373,30 +383,58 @@ bantime.maxtime = 7d
 enabled = true
 # Образ без rsyslog: /var/log/auth.log нет, и jail с файловым backend падает
 # с «Have not found any log file for sshd jail». Пакет 26.04 ставит systemd сам
-# (defaults-debian.conf), явная строка — страховка для образов и версий, где это не так
+# (defaults-debian.conf), явная строка — страховка для образов и версий, где это не так.
+# 22.04 с rsyslog — backend = auto (читает auth.log).
 backend = systemd
 # port = <SSH_PORT>   # если порт SSH сменён
-bantime = 6h
-findtime = 30m
-maxretry = 4
 
 [recidive]
-# читает /var/log/fail2ban.log — backend systemd сюда НЕ ставить
-enabled = true
-bantime = 7d
-findtime = 1d
+enabled  = true
+# Читает файл: fail2ban пишет баны в /var/log/fail2ban.log, не в journald. Без явного
+# backend = auto джейл наследует systemd из defaults-debian.conf и молча не видит ни строки.
+backend  = auto
+logpath  = /var/log/fail2ban.log
+banaction = nftables[type=allports]
+# Окно 7d, не 1d: при нарастающем бане sshd (6h, 24h) третий бан за сутки не наступает —
+# recidive с findtime 1d не банит никогда (замерено на 5 серверах: сотни кандидатов, 0 банов).
+findtime = 7d
 maxretry = 3
+# 30d → 60d → 90d. factor 1 обязателен: иначе factor 2 из [DEFAULT] удвоит каждую ступень.
+bantime  = 30d
+bantime.factor      = 1
+bantime.multipliers = 1 2 3
+bantime.maxtime     = 90d
 ```
 
+`/etc/fail2ban/fail2ban.d/db.local` — история банов не короче самого длинного бана, иначе
+нарастание забывает прошлые баны (по умолчанию 1d — ступени сбрасываются через сутки):
+```ini
+[Definition]
+dbpurgeage = 90d
+```
+
+Бессрочный бан (`bantime = -1`) не ставить: адреса ботов переходят к другим людям. UDP в
+recidive не включать: на UDP-портах VPN-клиенты с мобильных CGNAT-адресов, общих с ботами.
+
 ```bash
-sudo systemctl enable --now fail2ban
+sudo fail2ban-client -t                 # конфиг собирается
+sudo systemctl enable --now fail2ban    # меняешь banaction на живом сервере — stop со старым конфигом, замена, start
 sudo fail2ban-client status sshd
 # Фильтр реально видит отказы? На свежем сервере нули в status ничего не доказывают:
 sudo fail2ban-regex systemd-journal[journalflags=1] 'sshd[mode=normal]' | tail -3
+# recidive читает файл (а не «No file is currently monitored»):
+sudo fail2ban-client get recidive logpath
+# Множества раздельные: бан в двух джейлах, снятие из sshd не трогает recidive
+sudo fail2ban-client set sshd banip 192.0.2.77; sudo fail2ban-client set recidive banip 192.0.2.77
+sudo fail2ban-client set sshd unbanip 192.0.2.77
+sudo nft list set inet f2b-table addr-set-recidive | grep -c 192.0.2.77   # 1
+sudo fail2ban-client set recidive unbanip 192.0.2.77
 ```
 
 Ноль совпадений у сервера, который час висит в интернете, = фильтр не видит логи. На 26.04
 отказы пишет процесс `sshd-session`, а не `sshd`; jail ловит их через `_SYSTEMD_UNIT=ssh.service`.
+Через неделю после настройки: `fail2ban-client status recidive` — `Total banned` больше нуля,
+иначе recidive фиктивный.
 
 ---
 
